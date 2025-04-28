@@ -1,336 +1,208 @@
 CREATE DATABASE CAFETERIA;
 
--- Create custom types
-CREATE TYPE ORDER_STATUS AS ENUM ('Recibido', 'Preparando', 'Listo', 'Completado');
-CREATE TYPE PAYMENT_TYPE AS ENUM ('Efectivo', 'Tarjeta');
+-- Crear tipos personalizados
+CREATE TYPE estado_pedido AS ENUM ('Recibido', 'Preparando', 'Listo', 'Completado');
+CREATE TYPE tipo_pago AS ENUM ('Efectivo', 'Tarjeta');
 
--- Create CATEGORY table
-CREATE TABLE IF NOT EXISTS CATEGORY (
-  PK_CATEGORY uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  NAME text UNIQUE NOT NULL,
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla categoria
+CREATE TABLE IF NOT EXISTS categoria (
+  id_categoria UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre TEXT UNIQUE NOT NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
--- Create PRODUCT table
-CREATE TABLE IF NOT EXISTS PRODUCT (
-  PK_PRODUCT uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  NAME text NOT NULL,
-  DESCRIPTION text,
-  PRICE decimal(10,2) NOT NULL CHECK (PRICE >= 0),
-  IMAGE_URL text,
-  MODEL_3D_URL text,
-  CALORIES integer CHECK (CALORIES >= 0),
-  FK_CATEGORY uuid REFERENCES CATEGORY(PK_CATEGORY) ON DELETE SET NULL,
-  CREATED_AT timestamptz DEFAULT now(),
-  UPDATED_AT timestamptz DEFAULT now()
+-- Crear tabla producto
+CREATE TABLE IF NOT EXISTS producto (
+  id_producto UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre TEXT NOT NULL,
+  descripcion TEXT,
+  precio DECIMAL(10,2) NOT NULL CHECK (precio >= 0),
+  url_imagen TEXT,
+  url_modelo_3d TEXT,
+  calorias INTEGER CHECK (calorias >= 0),
+  id_categoria UUID REFERENCES categoria(id_categoria) ON DELETE SET NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
--- Create ALLERGEN table
-CREATE TABLE IF NOT EXISTS ALLERGEN (
-  PK_ALLERGEN uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  NAME text UNIQUE NOT NULL,
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla alergeno
+CREATE TABLE IF NOT EXISTS alergeno (
+  id_alergeno UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre TEXT UNIQUE NOT NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
--- Create DIETARY_PREFERENCE table
-CREATE TABLE IF NOT EXISTS DIETARY_PREFERENCE (
-  PK_DIETARY_PREFERENCE uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  NAME text UNIQUE NOT NULL,
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla preferencia_dietetica
+CREATE TABLE IF NOT EXISTS preferencia_dietetica (
+  id_preferencia UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre TEXT UNIQUE NOT NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
--- Create INGREDIENT table
-CREATE TABLE IF NOT EXISTS INGREDIENT (
-  PK_INGREDIENT uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  NAME text UNIQUE NOT NULL,
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla ingrediente
+CREATE TABLE IF NOT EXISTS ingrediente (
+  id_ingrediente UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  nombre TEXT UNIQUE NOT NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
--- Create PRODUCT_INGREDIENT junction table
-CREATE TABLE IF NOT EXISTS PRODUCT_INGREDIENT (
-  FK_PRODUCT uuid REFERENCES PRODUCT(PK_PRODUCT) ON DELETE CASCADE,
-  FK_INGREDIENT uuid REFERENCES INGREDIENT(PK_INGREDIENT) ON DELETE CASCADE,
-  PRIMARY KEY (FK_PRODUCT, FK_INGREDIENT)
+-- Crear tabla de unión producto_ingrediente
+CREATE TABLE IF NOT EXISTS producto_ingrediente (
+  id_producto UUID REFERENCES producto(id_producto) ON DELETE CASCADE,
+  id_ingrediente UUID REFERENCES ingrediente(id_ingrediente) ON DELETE CASCADE,
+  PRIMARY KEY (id_producto, id_ingrediente),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
 );
 
--- Create PRODUCT_ALLERGEN junction table
-CREATE TABLE IF NOT EXISTS PRODUCT_ALLERGEN (
-  FK_PRODUCT uuid REFERENCES PRODUCT(PK_PRODUCT) ON DELETE CASCADE,
-  FK_ALLERGEN uuid REFERENCES ALLERGEN(PK_ALLERGEN) ON DELETE CASCADE,
-  PRIMARY KEY (FK_PRODUCT, FK_ALLERGEN)
+-- Crear tabla de unión producto_alergeno
+CREATE TABLE IF NOT EXISTS producto_alergeno (
+  id_producto UUID REFERENCES producto(id_producto) ON DELETE CASCADE,
+  id_alergeno UUID REFERENCES alergeno(id_alergeno) ON DELETE CASCADE,
+  PRIMARY KEY (id_producto, id_alergeno),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
 );
 
--- Create PRODUCT_DIETARY_PREFERENCE junction table
-CREATE TABLE IF NOT EXISTS PRODUCT_DIETARY_PREFERENCE (
-  FK_PRODUCT uuid REFERENCES PRODUCT(PK_PRODUCT) ON DELETE CASCADE,
-  FK_DIETARY_PREFERENCE uuid REFERENCES DIETARY_PREFERENCE(PK_DIETARY_PREFERENCE) ON DELETE CASCADE,
-  PRIMARY KEY (FK_PRODUCT, FK_DIETARY_PREFERENCE)
-);
-
-
--- Se ejecuto hasta aqui 
--- Create ORDER table
-CREATE TABLE IF NOT EXISTS "ORDER" (
-  PK_ORDER uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  FK_USER uuid NOT NULL,
-  STATUS ORDER_STATUS DEFAULT 'Recibido' NOT NULL,
-  PAYMENT_METHOD PAYMENT_TYPE NOT NULL,
-  TOTAL decimal(10,2) NOT NULL CHECK (TOTAL >= 0),
-  CREATED_AT timestamptz DEFAULT now(),
-  UPDATED_AT timestamptz DEFAULT now()
+-- Crear tabla de unión producto_preferencia_dietetica
+CREATE TABLE IF NOT EXISTS producto_preferencia_dietetica (
+  id_producto UUID REFERENCES producto(id_producto) ON DELETE CASCADE,
+  id_preferencia UUID REFERENCES preferencia_dietetica(id_preferencia) ON DELETE CASCADE,
+  PRIMARY KEY (id_producto, id_preferencia),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
 );
 
 
--- Create ORDER_ITEM table
-CREATE TABLE IF NOT EXISTS ORDER_ITEM (
-  PK_ORDER_ITEM uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  FK_ORDER uuid REFERENCES "ORDER" (PK_ORDER) ON DELETE CASCADE NOT NULL,
-  FK_PRODUCT uuid REFERENCES PRODUCT(PK_PRODUCT) ON DELETE SET NULL NOT NULL,
-  QUANTITY integer NOT NULL CHECK (QUANTITY > 0),
-  UNIT_PRICE decimal(10,2) NOT NULL CHECK (UNIT_PRICE >= 0),
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla pedido
+CREATE TABLE IF NOT EXISTS pedido (
+  id_pedido UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_usuario UUID NOT NULL,
+  metodo_pago tipo_pago NOT NULL,
+  total DECIMAL(10,2) NOT NULL CHECK (total >= 0),
+  total_con_descuento DECIMAL(10,2) CHECK (total_con_descuento >= 0),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
-CREATE TABLE IF NOT EXISTS COUPON (
-  PK_COUPON uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  CODE text UNIQUE NOT NULL,
-  DISCOUNT decimal(10,2) NOT NULL CHECK (DISCOUNT >= 0),
-  EXPIRATION_DATE timestamptz NOT NULL,
-  USAGE_LIMIT integer CHECK (USAGE_LIMIT >= 0),
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla detalle_pedido
+CREATE TABLE IF NOT EXISTS detalle_pedido (
+  id_detalle UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_pedido UUID REFERENCES pedido(id_pedido) ON DELETE CASCADE NOT NULL,
+  id_producto UUID REFERENCES producto(id_producto) ON DELETE SET NULL NOT NULL,
+  cantidad INTEGER NOT NULL CHECK (cantidad > 0),
+  precio_unitario DECIMAL(10,2) NOT NULL CHECK (precio_unitario >= 0),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
-CREATE TABLE IF NOT EXISTS ORDER_COUPON (
-  PK_ORDER_COUPON uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  FK_ORDER uuid REFERENCES "ORDER" (PK_ORDER) ON DELETE CASCADE NOT NULL,
-  FK_COUPON uuid REFERENCES COUPON (PK_COUPON) ON DELETE CASCADE NOT NULL,
-  DISCOUNT_APPLIED decimal(10,2) NOT NULL CHECK (DISCOUNT_APPLIED >= 0),
-  CREATED_AT timestamptz DEFAULT now()
+-- Crear tabla cupon
+CREATE TABLE IF NOT EXISTS cupon (
+  id_cupon UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  codigo TEXT UNIQUE NOT NULL,
+  descuento DECIMAL(10,2) NOT NULL CHECK (descuento >= 0),
+  tipo_descuento TEXT CHECK (tipo_descuento IN ('fijo', 'porcentaje')) NOT NULL,
+  fecha_expiracion TIMESTAMPTZ NOT NULL,
+  limite_uso INTEGER CHECK (limite_uso >= 0),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ DEFAULT now(),
+  actualizado_por TEXT
 );
 
-CREATE TABLE IF NOT EXISTS ORDER_STATUS_HISTORY (
-  PK_ORDER_STATUS_HISTORY uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  FK_ORDER uuid REFERENCES "ORDER" (PK_ORDER) ON DELETE CASCADE NOT NULL,
-  STATUS text NOT NULL,
-  CHANGED_BY uuid REFERENCES USERS (PK_USER) ON DELETE SET NULL,
-  CHANGED_AT timestamptz DEFAULT now()
+-- Crear tabla de unión pedido_cupon
+CREATE TABLE IF NOT EXISTS pedido_cupon (
+  id_pedido_cupon UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_pedido UUID REFERENCES pedido(id_pedido) ON DELETE CASCADE NOT NULL,
+  id_cupon UUID REFERENCES cupon(id_cupon) ON DELETE CASCADE NOT NULL,
+  tipo_descuento TEXT CHECK (tipo_descuento IN ('fijo', 'porcentaje')) NOT NULL,
+  descuento_aplicado DECIMAL(10,2) NOT NULL CHECK (descuento_aplicado >= 0),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
 );
 
--- Create function to update UPDATED_AT timestamp
-CREATE OR REPLACE FUNCTION UPDATE_UPDATED_AT_COLUMN()
+-- Crear tabla historial_estado_pedido
+CREATE TABLE IF NOT EXISTS historial_estado_pedido (
+  id_historial UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_pedido UUID REFERENCES pedido(id_pedido) ON DELETE CASCADE NOT NULL,
+  estado estado_pedido NOT NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
+);
+
+-- Función para actualizar fecha_actualizacion
+CREATE OR REPLACE FUNCTION actualizar_fecha_actualizacion()
 RETURNS TRIGGER AS $$
 BEGIN
-  NEW.UPDATED_AT = now();
+  NEW.fecha_actualizacion = now();
   RETURN NEW;
 END;
-$$ language 'plpgsql';
+$$ LANGUAGE plpgsql;
 
--- Create triggers for updating UPDATED_AT
-CREATE TRIGGER UPDATE_PRODUCT_UPDATED_AT
-  BEFORE UPDATE ON PRODUCT
+-- Triggers para actualizar fecha_actualizacion
+CREATE TRIGGER actualizar_producto
+  BEFORE UPDATE ON producto
   FOR EACH ROW
-  EXECUTE FUNCTION UPDATE_UPDATED_AT_COLUMN();
+  EXECUTE FUNCTION actualizar_fecha_actualizacion();
 
-CREATE TRIGGER UPDATE_ORDER_UPDATED_AT
-  BEFORE UPDATE ON "ORDER"
+CREATE TRIGGER actualizar_pedido
+  BEFORE UPDATE ON pedido
   FOR EACH ROW
-  EXECUTE FUNCTION UPDATE_UPDATED_AT_COLUMN();
+  EXECUTE FUNCTION actualizar_fecha_actualizacion();
+
+ -- Valores unicos
+ALTER TABLE alergeno ADD CONSTRAINT alergeno_nombre_unique UNIQUE (nombre);
+ALTER TABLE preferencia_dietetica ADD CONSTRAINT preferencia_nombre_unique UNIQUE (nombre);
+ALTER TABLE categoria ADD CONSTRAINT categoria_nombre_unique UNIQUE (nombre);
+ALTER TABLE ingrediente ADD CONSTRAINT ingrediente_nombre_unique UNIQUE (nombre);
+ALTER TABLE producto ADD CONSTRAINT producto_nombre_unique UNIQUE (nombre);
+
+CREATE INDEX idx_producto_categoria ON producto(id_categoria);
+CREATE INDEX idx_pedido_usuario ON pedido(id_usuario);
+CREATE INDEX idx_detalle_pedido_pedido ON detalle_pedido(id_pedido);
+CREATE INDEX idx_detalle_pedido_producto ON detalle_pedido(id_producto);
+CREATE INDEX idx_historial_pedido ON historial_estado_pedido(id_pedido);
+
  
- 
+-- INSERTS
+INSERT INTO alergeno (nombre) VALUES 
+('Gluten'), ('Lácteos'), ('Frutos secos'), ('Huevo'), ('Soja'), ('Mariscos'), ('Pescado'), ('Apio')
+ON CONFLICT (nombre) DO NOTHING;
 
--- INSERTS PARA ALERGENOS
-INSERT INTO ALLERGEN (NAME) VALUES 
-('Gluten'),
-('Lácteos'),
-('Frutos secos'),
-('Huevo'),
-('Soja'),
-('Mariscos'),
-('Pescado'),
-('Apio');
+INSERT INTO preferencia_dietetica (nombre) VALUES 
+('Vegetariano'), ('Vegano'), ('Sin gluten'), ('Bajo en azúcar'), ('Bajo en calorías'), ('Keto'), ('Paleo'), ('Sin lactosa')
+ON CONFLICT (nombre) DO NOTHING;
 
--- INSERTS PARA PREFERENCIAS DIETÉTICAS
-INSERT INTO DIETARY_PREFERENCE (NAME) VALUES 
-('Vegetariano'),
-('Vegano'),
-('Sin gluten'),
-('Bajo en azúcar'),
-('Bajo en calorías'),
-('Keto'),
-('Paleo'),
-('Sin lactosa');
+INSERT INTO categoria (nombre) VALUES 
+('Café'), ('Bebidas frías'), ('Pasteles'), ('Sándwiches'), ('Ensaladas'), ('Desayunos'), ('Postres'), ('Comidas rápidas')
+ON CONFLICT (nombre) DO NOTHING;
 
--- INSERTS PARA CATEGORÍAS
-INSERT INTO CATEGORY (NAME) VALUES 
-('Café'),
-('Bebidas frías'),
-('Pasteles'),
-('Sándwiches'),
-('Ensaladas'),
-('Desayunos'),
-('Postres'),
-('Comidas rápidas');
+INSERT INTO ingrediente (nombre) VALUES 
+('Café'), ('Leche'), ('Azúcar'), ('Harina de trigo'), ('Huevos'), ('Mantequilla'), ('Chocolate'), ('Nata'), ('Queso'), ('Jamón'), ('Lechuga'), ('Tomate'), ('Pan'), ('Pollo'), ('Fresas')
+ON CONFLICT (nombre) DO NOTHING;
 
--- INSERTS PARA INGREDIENTES
-INSERT INTO INGREDIENT (NAME) VALUES 
-('Café'),
-('Leche'),
-('Azúcar'),
-('Harina de trigo'),
-('Huevos'),
-('Mantequilla'),
-('Chocolate'),
-('Nata'),
-('Queso'),
-('Jamón'),
-('Lechuga'),
-('Tomate'),
-('Pan'),
-('Pollo'),
-('Fresas');
+INSERT INTO producto (nombre, descripcion, precio, url_imagen, url_modelo_3d, calorias, id_categoria) VALUES 
+('Café Latte', 'Espresso con leche cremosa al vapor', 3.50, '', '', 120, (SELECT id_categoria FROM categoria WHERE nombre = 'Café')),
+('Tarta de Chocolate', 'Deliciosa tarta con ganache de chocolate negro', 4.95, '', '', 350, (SELECT id_categoria FROM categoria WHERE nombre = 'Pasteles'))
+ON CONFLICT (nombre) DO NOTHING;
 
--- INSERTS PARA PRODUCTOS
-INSERT INTO PRODUCT (NAME, DESCRIPTION, PRICE, IMAGE_URL, MODEL_3D_URL, CALORIES, FK_CATEGORY) VALUES 
-(
-    'Café Latte', 
-    'Espresso con leche cremosa al vapor', 
-    3.50, 
-    'https://images.unsplash.com/photo-1541167760496-1628856ab772', 
-    'https://modelviewer.dev/shared-assets/models/NeilArmstrong.webp', 
-    120, 
-    (SELECT PK_CATEGORY FROM CATEGORY WHERE NAME = 'Café')
-),
-(
-    'Tarta de Chocolate', 
-    'Deliciosa tarta con ganache de chocolate negro', 
-    4.95, 
-    'https://images.unsplash.com/photo-1578985545062-69928b1d9587', 
-    'https://modelviewer.dev/shared-assets/models/NeilArmstrong.webp', 
-    350, 
-    (SELECT PK_CATEGORY FROM CATEGORY WHERE NAME = 'Pasteles')
-),
-(
-    'Ensalada César', 
-    'Lechuga romana, crutones, pollo y aderezo César', 
-    8.75, 
-    'https://images.unsplash.com/photo-1550304943-4f24f54ddde9', 
-    'https://modelviewer.dev/shared-assets/models/NeilArmstrong.webp', 
-    420, 
-    (SELECT PK_CATEGORY FROM CATEGORY WHERE NAME = 'Ensaladas')
-),
-(
-    'Sándwich Vegetariano', 
-    'Pan integral con hummus, aguacate y vegetales frescos', 
-    7.25, 
-    'https://images.unsplash.com/photo-1554433607-66b5efe9d304', 
-    '', 
-    380, 
-    (SELECT PK_CATEGORY FROM CATEGORY WHERE NAME = 'Sándwiches')
-),
-(
-    'Smoothie de Frutas', 
-    'Batido refrescante de frutas mixtas y yogur', 
-    5.50, 
-    'https://images.unsplash.com/photo-1589734435354-1e25f1c8ee09', 
-    '', 
-    220, 
-    (SELECT PK_CATEGORY FROM CATEGORY WHERE NAME = 'Bebidas frías')
-);
 
--- INSERTS PARA PRODUCTOS-ALÉRGENOS
-INSERT INTO PRODUCT_ALLERGEN (FK_PRODUCT, FK_ALLERGEN) VALUES
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Café Latte'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Lácteos')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Tarta de Chocolate'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Gluten')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Tarta de Chocolate'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Lácteos')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Tarta de Chocolate'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Huevo')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Ensalada César'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Gluten')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Sándwich Vegetariano'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Gluten')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Smoothie de Frutas'),
-    (SELECT PK_ALLERGEN FROM ALLERGEN WHERE NAME = 'Lácteos')
-);
 
--- INSERTS PARA PRODUCTOS-DIETAS
-INSERT INTO PRODUCT_DIETARY_PREFERENCE (FK_PRODUCT, FK_DIETARY_PREFERENCE) VALUES
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Sándwich Vegetariano'),
-    (SELECT PK_DIETARY_PREFERENCE FROM DIETARY_PREFERENCE WHERE NAME = 'Vegetariano')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Smoothie de Frutas'),
-    (SELECT PK_DIETARY_PREFERENCE FROM DIETARY_PREFERENCE WHERE NAME = 'Vegetariano')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Smoothie de Frutas'),
-    (SELECT PK_DIETARY_PREFERENCE FROM DIETARY_PREFERENCE WHERE NAME = 'Bajo en calorías')
-);
-
--- INSERTS PARA PRODUCTOS-INGREDIENTES
-INSERT INTO PRODUCT_INGREDIENT (FK_PRODUCT, FK_INGREDIENT) VALUES
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Café Latte'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Café')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Café Latte'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Leche')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Tarta de Chocolate'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Harina de trigo')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Tarta de Chocolate'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Chocolate')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Tarta de Chocolate'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Huevos')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Ensalada César'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Lechuga')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Ensalada César'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Pollo')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Sándwich Vegetariano'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Pan')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Sándwich Vegetariano'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Tomate')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Sándwich Vegetariano'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Lechuga')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Smoothie de Frutas'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Fresas')
-),
-(
-    (SELECT PK_PRODUCT FROM PRODUCT WHERE NAME = 'Smoothie de Frutas'),
-    (SELECT PK_INGREDIENT FROM INGREDIENT WHERE NAME = 'Leche')
-); 
- 
