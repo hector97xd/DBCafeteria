@@ -367,6 +367,93 @@ INSERT INTO producto (
 ('Combo Desayuno Completo', 'Incluye café americano, tostadas francesas y jugo de naranja natural. Ahorra $2.50 con este combo especial.', 8.99, 650, 'hector.guevara'),
 ('Almuerzo Ejecutivo', 'Sándwich de pollo + ensalada César + refresco o café. Precio especial para horas de almuerzo (11am-3pm).', 10.50, 850, 'hector.guevara');
 
+-- Relacionar productos con categorías
+INSERT INTO producto_categoria (id_producto, id_categoria, creado_por)
+SELECT 
+    p.id_producto, 
+    c.id_categoria, 
+    'hector.guevara'
+FROM producto p
+CROSS JOIN categoria c
+WHERE 
+    -- Café y bebidas
+    (p.nombre = 'Café Latte' AND c.nombre = 'Café') OR
+    (p.nombre = 'Café Americano' AND c.nombre = 'Café') OR
+    (p.nombre = 'Capuchino Clásico' AND c.nombre = 'Café') OR
+    (p.nombre = 'Botella de Vino Tinto' AND c.nombre = 'Bebidas frías') OR
+    (p.nombre = 'Lata de Refresco' AND c.nombre = 'Bebidas frías') OR
+    
+    -- Pasteles y postres
+    (p.nombre = 'Tarta de Chocolate' AND c.nombre = 'Pasteles') OR
+    (p.nombre = 'Croissant de Mantequilla' AND c.nombre = 'Pasteles') OR
+    (p.nombre = 'Cheesecake de Frutos Rojos' AND c.nombre = 'Postres') OR
+    (p.nombre = 'Mousse de Chocolate' AND c.nombre = 'Postres') OR
+    
+    -- Sándwiches y comidas rápidas
+    (p.nombre = 'Sándwich de Pollo' AND c.nombre = 'Sándwiches') OR
+    (p.nombre = 'Bagel con Salmón' AND c.nombre = 'Sándwiches') OR
+    (p.nombre = 'Hamburguesa Clásica' AND c.nombre = 'Comidas rápidas') OR
+    
+    -- Ensaladas
+    (p.nombre = 'Ensalada César' AND c.nombre = 'Ensaladas') OR
+    (p.nombre = 'Ensalada de Quinoa' AND c.nombre = 'Ensaladas') OR
+    
+    -- Desayunos
+    (p.nombre = 'Tostadas Francesas' AND c.nombre = 'Desayunos') OR
+    (p.nombre = 'Omelette Vegetariano' AND c.nombre = 'Desayunos') OR
+    
+    -- Promociones
+    (p.nombre = 'Combo Desayuno Completo' AND c.nombre = 'Promociones') OR
+    (p.nombre = 'Almuerzo Ejecutivo' AND c.nombre = 'Promociones')
+ON CONFLICT (id_producto, id_categoria) DO NOTHING;
+
+-- Relacionar ingredientes con productos
+INSERT INTO producto_ingrediente (id_producto, id_ingrediente, creado_por)
+SELECT 
+    p.id_producto, 
+    i.id_ingrediente, 
+    'hector.guevara'
+FROM producto p
+CROSS JOIN ingrediente i
+WHERE 
+    (p.nombre = 'Café Latte' AND i.nombre IN ('Café', 'Leche')) OR
+    (p.nombre = 'Tarta de Chocolate' AND i.nombre IN ('Harina de trigo', 'Huevos', 'Mantequilla', 'Chocolate')) OR
+    (p.nombre = 'Sándwich de Pollo' AND i.nombre IN ('Pan', 'Pollo', 'Lechuga', 'Tomate')) OR
+    (p.nombre = 'Ensalada César' AND i.nombre IN ('Lechuga', 'Queso', 'Pan')) OR
+    (p.nombre = 'Cheesecake de Frutos Rojos' AND i.nombre IN ('Queso', 'Fresas', 'Nata'))
+ON CONFLICT (id_producto, id_ingrediente) DO NOTHING;
+
+-- Relacionar alergenos con productos
+INSERT INTO producto_alergeno (id_producto, id_alergeno, creado_por)
+SELECT 
+    p.id_producto, 
+    a.id_alergeno, 
+    'hector.guevara'
+FROM producto p
+CROSS JOIN alergeno a
+WHERE 
+    (p.nombre = 'Café Latte' AND a.nombre IN ('Leche')) OR
+    (p.nombre = 'Tarta de Chocolate' AND a.nombre IN ('Huevos', 'Gluten', 'Leche')) OR
+    (p.nombre = 'Sándwich de Pollo' AND a.nombre IN ('Gluten')) OR
+    (p.nombre = 'Bagel con Salmón' AND a.nombre IN ('Gluten', 'Pescado')) OR
+    (p.nombre = 'Cheesecake de Frutos Rojos' AND a.nombre IN ('Leche', 'Huevos'))
+ON CONFLICT (id_producto, id_alergeno) DO NOTHING;
+
+-- Relacionar preferencias dietéticas con productos
+INSERT INTO producto_preferencia_dietetica (id_producto, id_preferencia, creado_por)
+SELECT 
+    p.id_producto, 
+    pd.id_preferencia, 
+    'hector.guevara'
+FROM producto p
+CROSS JOIN preferencia_dietetica pd
+WHERE 
+    (p.nombre = 'Ensalada de Quinoa' AND pd.nombre IN ('Vegano', 'Vegetariano', 'Sin gluten')) OR
+    (p.nombre = 'Omelette Vegetariano' AND pd.nombre IN ('Vegetariano', 'Alto en proteína')) OR
+    (p.nombre = 'Tarta de Chocolate' AND pd.nombre IN ('Vegetariano')) OR
+    (p.nombre = 'Ensalada César' AND pd.nombre IN ('Bajo en carbohidratos'))
+ON CONFLICT (id_producto, id_preferencia) DO NOTHING;
+
 -- Imágenes para productos principales
 INSERT INTO producto_imagen (
   id_producto, 
@@ -556,3 +643,128 @@ INSERT INTO historial_estado_pedido (
 ) VALUES 
 ('id-del-primer-pedido', 'Preparando', 'hector.guevara'),
 ('id-del-primer-pedido', 'Listo', 'hector.guevara');
+
+
+
+
+
+drop FUNCTION obtener_productos_con_relaciones
+
+CREATE OR REPLACE FUNCTION obtener_productos_con_relaciones(
+    p_id_producto UUID DEFAULT NULL,
+    p_nombre_producto TEXT DEFAULT NULL,
+    p_activo BOOLEAN DEFAULT NULL,
+    p_id_categoria UUID DEFAULT NULL
+)
+RETURNS TABLE (
+    "IdProducto" UUID,
+    "Nombre" TEXT,
+    "Descripcion" TEXT,
+    "Precio" DECIMAL(10,2),
+    "UrlModelo3D" TEXT,
+    "Calorias" INTEGER,
+    "EsActivo" BOOLEAN,
+    "FechaCreacion" TIMESTAMPTZ,
+    "Categorias" TEXT,
+    "Ingredientes" TEXT,
+    "Alergenos" TEXT,
+    "PreferenciasDieteticas" TEXT,
+    "Descuentos" JSON,
+    "Imagenes" JSON
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.id_producto AS "IdProducto",
+        p.nombre AS "Nombre",
+        p.descripcion AS "Descripcion",
+        p.precio AS "Precio",
+        p.url_modelo_3d AS "UrlModelo3D",
+        p.calorias AS "Calorias",
+        p.es_activo AS "EsActivo",
+        p.fecha_creacion AS "FechaCreacion",
+        
+        -- Categorías
+        (
+            SELECT string_agg(c.nombre, ', ')
+            FROM producto_categoria pc
+            JOIN categoria c ON pc.id_categoria = c.id_categoria
+            WHERE pc.id_producto = p.id_producto
+        ) AS "Categorias",
+        
+        -- Ingredientes
+        (
+            SELECT string_agg(i.nombre, ', ')
+            FROM producto_ingrediente pi
+            JOIN ingrediente i ON pi.id_ingrediente = i.id_ingrediente
+            WHERE pi.id_producto = p.id_producto
+        ) AS "Ingredientes",
+        
+        -- Alérgenos
+        (
+            SELECT string_agg(a.nombre, ', ')
+            FROM producto_alergeno pa
+            JOIN alergeno a ON pa.id_alergeno = a.id_alergeno
+            WHERE pa.id_producto = p.id_producto
+        ) AS "Alergenos",
+        
+        -- Preferencias dietéticas
+        (
+            SELECT string_agg(pd.nombre, ', ')
+            FROM producto_preferencia_dietetica ppd
+            JOIN preferencia_dietetica pd ON ppd.id_preferencia = pd.id_preferencia
+            WHERE ppd.id_producto = p.id_producto
+        ) AS "PreferenciasDieteticas",
+        
+        -- Descuentos activos
+        (
+            SELECT json_agg(json_build_object(
+                'tipo', dp.tipo_descuento,
+                'valor', dp.valor,
+                'fecha_inicio', dp.fecha_inicio,
+                'fecha_fin', dp.fecha_fin
+            ))
+            FROM descuento_producto dp
+            WHERE dp.id_producto = p.id_producto
+            AND dp.es_activo = TRUE
+            AND CURRENT_TIMESTAMP BETWEEN dp.fecha_inicio AND dp.fecha_fin
+        )::JSON AS "Descuentos",
+        
+        -- Imágenes
+        (
+            SELECT json_agg(json_build_object(
+                'url', pi.url_imagen,
+                'orden', pi.orden,
+                'es_principal', pi.es_principal
+            ) ORDER BY pi.orden)
+            FROM producto_imagen pi
+            WHERE pi.id_producto = p.id_producto
+        )::JSON AS "Imagenes"
+        
+    FROM producto p
+    LEFT JOIN producto_categoria pc ON p.id_producto = pc.id_producto
+    WHERE 
+        (p_id_producto IS NULL OR p.id_producto = p_id_producto)
+        AND (p_nombre_producto IS NULL OR p.nombre ILIKE '%' || p_nombre_producto || '%')
+        AND (p_activo IS NULL OR p.es_activo = p_activo)
+        AND (p_id_categoria IS NULL OR pc.id_categoria = p_id_categoria)
+    GROUP BY p.id_producto
+    ORDER BY p.nombre;
+END;
+$$ LANGUAGE plpgsql;
+
+
+-- Todos los productos
+SELECT * FROM obtener_productos_con_relaciones();
+
+-- Productos activos
+SELECT * FROM obtener_productos_con_relaciones(p_activo => true);
+
+-- Productos de una categoría específica
+SELECT * FROM obtener_productos_con_relaciones(p_id_categoria => '3724269c-1686-4883-a8a4-368822cecd6e');
+
+-- Búsqueda por nombre
+SELECT * FROM obtener_productos_con_relaciones(p_nombre_producto => 'café');
+
+-- Un producto específico
+SELECT * FROM obtener_productos_con_relaciones(p_id_producto => 'a1b2c3d4-e5f6-7890-abcd-ef1234567890');
