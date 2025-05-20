@@ -219,7 +219,13 @@ CREATE INDEX idx_producto_precio ON producto(precio);
 CREATE INDEX idx_historial_estado ON historial_estado_pedido(estado);
 CREATE INDEX idx_historial_fecha ON historial_estado_pedido(fecha_creacion);
 
- 
+CREATE INDEX idx_descuento_producto_completo ON descuento_producto(id_producto, fecha_inicio, fecha_fin) WHERE es_activo = TRUE;
+CREATE INDEX idx_producto_categoria_producto ON producto_categoria(id_producto);
+CREATE INDEX idx_producto_ingrediente_producto ON producto_ingrediente(id_producto);
+CREATE INDEX idx_producto_alergeno_producto ON producto_alergeno(id_producto);
+CREATE INDEX idx_producto_preferencia_producto ON producto_preferencia_dietetica(id_producto);
+CREATE INDEX idx_producto_imagen_producto ON producto_imagen(id_producto);
+
 -- INSERTS
 -- Insertar alergenos (ajustado con campos de auditoría completos)
 INSERT INTO alergeno (nombre, creado_por, fecha_creacion, fecha_actualizacion, actualizado_por) 
@@ -661,6 +667,7 @@ RETURNS TABLE (
     "Nombre" TEXT,
     "Descripcion" TEXT,
     "Precio" DECIMAL(10,2),
+    "PrecioConDescuento" DECIMAL(10,2),
     "UrlModelo3D" TEXT,
     "Calorias" INTEGER,
     "EsActivo" BOOLEAN,
@@ -679,6 +686,24 @@ BEGIN
         p.nombre AS "Nombre",
         p.descripcion AS "Descripcion",
         p.precio AS "Precio",
+        -- Calcular precio con descuento
+        COALESCE(
+            (SELECT 
+                CASE 
+                    WHEN dp.tipo_descuento = 'porcentaje' THEN 
+                        p.precio * (1 - dp.valor/100)
+                    WHEN dp.tipo_descuento = 'monto_fijo' THEN 
+                        GREATEST(p.precio - dp.valor, 0)
+                    ELSE p.precio
+                END
+            FROM descuento_producto dp
+            WHERE dp.id_producto = p.id_producto
+            AND dp.es_activo = TRUE
+            AND CURRENT_TIMESTAMP BETWEEN dp.fecha_inicio AND dp.fecha_fin
+            LIMIT 1),
+            p.precio
+        ) AS "PrecioConDescuento",
+        
         p.url_modelo_3d AS "UrlModelo3D",
         p.calorias AS "Calorias",
         p.es_activo AS "EsActivo",
@@ -748,11 +773,338 @@ BEGIN
         AND (p_nombre_producto IS NULL OR p.nombre ILIKE '%' || p_nombre_producto || '%')
         AND (p_activo IS NULL OR p.es_activo = p_activo)
         AND (p_id_categoria IS NULL OR pc.id_categoria = p_id_categoria)
-    GROUP BY p.id_producto
+    GROUP BY p.id_producto, p.nombre, p.descripcion, p.precio, p.url_modelo_3d, p.calorias, p.es_activo, p.fecha_creacion
     ORDER BY p.nombre;
 END;
 $$ LANGUAGE plpgsql;
 
+--V2
+CREATE OR REPLACE FUNCTION obtener_productos_con_relaciones(
+    p_id_producto UUID DEFAULT NULL,
+    p_nombre_producto TEXT DEFAULT NULL,
+    p_activo BOOLEAN DEFAULT NULL,
+    p_id_categoria UUID DEFAULT NULL
+)
+RETURNS TABLE (
+    "IdProducto" UUID,
+    "Nombre" TEXT,
+    "Descripcion" TEXT,
+    "Precio" DECIMAL(10,2),
+    "PrecioConDescuento" DECIMAL(10,2),
+    "UrlModelo3D" TEXT,
+    "Calorias" INTEGER,
+    "EsActivo" BOOLEAN,
+    "FechaCreacion" TIMESTAMPTZ,
+    "Categorias" TEXT,
+    "Ingredientes" TEXT,
+    "Alergenos" TEXT,
+    "PreferenciasDieteticas" TEXT,
+    "Descuentos" JSON,
+    "Imagenes" JSON
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.id_producto AS "IdProducto",
+        p.nombre AS "Nombre",
+        p.descripcion AS "Descripcion",
+        p.precio AS "Precio",
+
+        -- Calcular precio con descuento
+        COALESCE(
+            (SELECT 
+                CASE 
+                    WHEN dp.tipo_descuento = 'porcentaje' THEN 
+                        p.precio * (1 - dp.valor/100)
+                    WHEN dp.tipo_descuento = 'monto_fijo' THEN 
+                        GREATEST(p.precio - dp.valor, 0)
+                    ELSE p.precio
+                END
+            FROM descuento_producto dp
+            WHERE dp.id_producto = p.id_producto
+              AND dp.es_activo = TRUE
+              AND CURRENT_TIMESTAMP BETWEEN dp.fecha_inicio AND dp.fecha_fin
+            LIMIT 1),
+            p.precio
+        ) AS "PrecioConDescuento",
+
+        p.url_modelo_3d AS "UrlModelo3D",
+        p.calorias AS "Calorias",
+        p.es_activo AS "EsActivo",
+        p.fecha_creacion AS "FechaCreacion",
+
+        -- Categorías
+        (
+            SELECT string_agg(c.nombre, ', ')
+            FROM producto_categoria pc
+            JOIN categoria c ON pc.id_categoria = c.id_categoria
+            WHERE pc.id_producto = p.id_producto
+        ) AS "Categorias",
+
+        -- Ingredientes
+        (
+            SELECT string_agg(i.nombre, ', ')
+            FROM producto_ingrediente pi
+            JOIN ingrediente i ON pi.id_ingrediente = i.id_ingrediente
+            WHERE pi.id_producto = p.id_producto
+        ) AS "Ingredientes",
+
+        -- Alérgenos
+        (
+            SELECT string_agg(a.nombre, ', ')
+            FROM producto_alergeno pa
+            JOIN alergeno a ON pa.id_alergeno = a.id_alergeno
+            WHERE pa.id_producto = p.id_producto
+        ) AS "Alergenos",
+
+        -- Preferencias dietéticas
+        (
+            SELECT string_agg(pd.nombre, ', ')
+            FROM producto_preferencia_dietetica ppd
+            JOIN preferencia_dietetica pd ON ppd.id_preferencia = pd.id_preferencia
+            WHERE ppd.id_producto = p.id_producto
+        ) AS "PreferenciasDieteticas",
+
+        -- Descuentos activos
+        (
+            SELECT json_agg(json_build_object(
+                'tipo', dp.tipo_descuento,
+                'valor', dp.valor,
+                'fecha_inicio', dp.fecha_inicio,
+                'fecha_fin', dp.fecha_fin
+            ))
+            FROM descuento_producto dp
+            WHERE dp.id_producto = p.id_producto
+              AND dp.es_activo = TRUE
+              AND CURRENT_TIMESTAMP BETWEEN dp.fecha_inicio AND dp.fecha_fin
+        )::JSON AS "Descuentos",
+
+        -- Imágenes
+        (
+            SELECT json_agg(json_build_object(
+                'url', pi.url_imagen,
+                'orden', pi.orden,
+                'es_principal', pi.es_principal
+            ) ORDER BY pi.orden)
+            FROM producto_imagen pi
+            WHERE pi.id_producto = p.id_producto
+        )::JSON AS "Imagenes"
+
+    FROM producto p
+    LEFT JOIN producto_categoria pc ON p.id_producto = pc.id_producto
+    WHERE 
+        (p_id_producto IS NULL OR p.id_producto = p_id_producto)
+        AND (p_nombre_producto IS NULL OR p.nombre ILIKE '%' || p_nombre_producto || '%')
+        AND (p_activo IS NULL OR p.es_activo = p_activo)
+        AND (p_id_categoria IS NULL OR pc.id_categoria = p_id_categoria)
+    GROUP BY p.id_producto, p.nombre, p.descripcion, p.precio, p.url_modelo_3d, p.calorias, p.es_activo, p.fecha_creacion
+    ORDER BY p.nombre;
+END;
+$$ LANGUAGE plpgsql;
+
+--Registro de recepcion pedidos
+drop FUNCTION registrar_pedido_completo 
+CREATE OR REPLACE FUNCTION registrar_pedido_completo(
+    p_id_usuario UUID,
+    p_metodo_pago tipo_pago,
+    p_total DECIMAL,
+    p_total_con_descuento DECIMAL,
+    p_creado_por TEXT,
+    p_detalles JSON,
+    p_cupones JSON DEFAULT NULL  -- Nuevo parámetro para múltiples cupones
+)
+RETURNS TABLE (
+    id_pedido UUID,
+    mensaje TEXT,
+    exito BOOLEAN
+) AS $$
+DECLARE
+    v_id_pedido UUID := gen_random_uuid();
+    v_detalle RECORD;
+    v_cupon RECORD;
+    v_error_context TEXT;
+BEGIN
+    -- Validaciones iniciales (igual que antes)
+    IF p_total <= 0 THEN
+        RETURN QUERY SELECT NULL::UUID, 'El total del pedido debe ser mayor que cero', FALSE;
+        RETURN;
+    END IF;
+    
+    -- Resto de validaciones...
+
+    -- Insertar pedido (igual que antes)
+    INSERT INTO pedido (
+        id_pedido,
+        id_usuario,
+        metodo_pago,
+        total,
+        total_con_descuento,
+        creado_por,
+        fecha_creacion
+    ) VALUES (
+        v_id_pedido,
+        p_id_usuario,
+        p_metodo_pago,
+        p_total,
+        p_total_con_descuento,
+        p_creado_por,
+        NOW()
+    );
+
+    -- Insertar detalles (igual que antes)
+    FOR v_detalle IN SELECT * FROM json_to_recordset(p_detalles) AS (
+        id_producto UUID,
+        cantidad INTEGER,
+        precio_unitario DECIMAL
+    )
+    LOOP
+        -- Validaciones y inserción...
+    END LOOP;
+
+    -- Insertar múltiples cupones si existen
+    IF p_cupones IS NOT NULL THEN
+        FOR v_cupon IN SELECT * FROM json_to_recordset(p_cupones) AS (
+            id_cupon UUID,
+            tipo_descuento TEXT,
+            descuento_aplicado DECIMAL
+        )
+        LOOP
+            -- Validar cada cupón
+            IF v_cupon.descuento_aplicado < 0 THEN
+                RETURN QUERY SELECT NULL::UUID, 'El descuento aplicado no puede ser negativo', FALSE;
+                RETURN;
+            END IF;
+            
+            IF v_cupon.tipo_descuento NOT IN ('fijo', 'porcentaje') THEN
+                RETURN QUERY SELECT NULL::UUID, 'Tipo de descuento no válido. Debe ser "fijo" o "porcentaje"', FALSE;
+                RETURN;
+            END IF;
+
+            INSERT INTO pedido_cupon (
+                id_pedido,
+                id_cupon,
+                tipo_descuento,
+                descuento_aplicado,
+                creado_por,
+                fecha_creacion
+            ) VALUES (
+                v_id_pedido,
+                v_cupon.id_cupon,
+                v_cupon.tipo_descuento,
+                v_cupon.descuento_aplicado,
+                p_creado_por,
+                NOW()
+            );
+        END LOOP;
+    END IF;
+
+    -- Insertar historial de estado (igual que antes)
+    INSERT INTO historial_estado_pedido (
+        id_pedido,
+        estado,
+        creado_por,
+        fecha_creacion
+    ) VALUES (
+        v_id_pedido,
+        'Recibido',
+        p_creado_por,
+        NOW()
+    );
+
+    RETURN QUERY SELECT v_id_pedido, 
+                    'Pedido registrado correctamente con ' || 
+                    json_array_length(p_detalles) || ' detalles y ' ||
+                    COALESCE(json_array_length(p_cupones), 0) || ' cupones', 
+                    TRUE;
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_error_context = PG_EXCEPTION_CONTEXT;
+    RETURN QUERY SELECT NULL::UUID, 
+                    'Error al registrar el pedido: ' || SQLERRM || 
+                    ' - Contexto: ' || v_error_context, 
+                    FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT * FROM registrar_pedido_completo(
+    -- ID de usuario (ejemplo)
+    p_id_usuario := 'a1b2c3d4-e5f6-7890-1234-567890abcdef',
+    
+    -- Método de pago
+    p_metodo_pago := 'Efectivo',
+    
+    -- Totales
+    p_total := 150.00,
+    p_total_con_descuento := 135.00,
+    
+    -- Creado por
+    p_creado_por := 'usuario@ejemplo.com',
+    
+    -- Detalles del pedido en formato JSON
+    p_detalles := '[
+        {"id_producto": "41a196cd-47fc-42ed-964d-5eccf2eb15a2", "cantidad": 2, "precio_unitario": 25.00},
+        {"id_producto": "5a6a9438-1dff-4b37-b48f-94447bab3169", "cantidad": 1, "precio_unitario": 50.00},
+        {"id_producto": "bdff35d6-0e47-441e-b9c5-7596cde586fc", "cantidad": 3, "precio_unitario": 10.00}
+    ]',
+    
+    -- Cupón (usando el ID proporcionado)
+    p_id_cupon := '04f5318d-cb7f-4255-ab92-5721b3ca34d7',
+    
+    -- Tipo de descuento y monto aplicado
+    p_tipo_descuento := 'porcentaje',
+    p_descuento_aplicado := 10.00
+);
+
+SELECT * FROM registrar_pedido_completo(
+    -- ID de usuario (debes reemplazarlo con uno válido de tu sistema)
+    p_id_usuario := 'a1b2c3d4-e5f6-7890-1234-567890abcdef',
+    
+    -- Método de pago (usa uno de los valores de tu enum tipo_pago)
+    p_metodo_pago := 'Efectivo',
+    
+    -- Totales (sin descuento)
+    p_total := 120.50,
+    p_total_con_descuento := 120.50,  -- Igual al total al no haber cupón
+    
+    -- Usuario que crea el pedido
+    p_creado_por := 'cliente@email.com',
+    
+    -- Detalles del pedido en formato JSON (3 productos)
+    p_detalles := '[
+        {"id_producto": "41a196cd-47fc-42ed-964d-5eccf2eb15a2", "cantidad": 1, "precio_unitario": 45.00},
+        {"id_producto": "bdff35d6-0e47-441e-b9c5-7596cde586fc", "cantidad": 2, "precio_unitario": 25.75},
+        {"id_producto": "6d8da158-85af-4f99-8abe-e591427a4f22", "cantidad": 1, "precio_unitario": 24.00}
+    ]',
+    
+    -- Parámetros de cupón como NULL (sin cupón)
+    p_id_cupon := NULL,
+    p_tipo_descuento := NULL,
+    p_descuento_aplicado := NULL
+);
+--multiples cupones
+SELECT * FROM registrar_pedido_completo(
+    'a1b2c3d4-e5f6-7890-1234-567890abcdef',  -- id_usuario
+    'Efectivo',                              -- metodo_pago
+    200.00,                                  -- total
+    150.00,                                  -- total_con_descuento
+    'cliente@email.com',                     -- creado_por
+    '[{
+        "id_producto": "41a196cd-47fc-42ed-964d-5eccf2eb15a2",
+        "cantidad": 2,
+        "precio_unitario": 50.00
+    }, {
+        "id_producto": "bdff35d6-0e47-441e-b9c5-7596cde586fc",
+        "cantidad": 1,
+        "precio_unitario": 100.00
+    }]',
+    '[{
+        "id_cupon": "04f5318d-cb7f-4255-ab92-5721b3ca34d7",
+        "tipo_descuento": "porcentaje",
+        "descuento_aplicado": 20.00
+    }]'
+);
+
+EXPLAIN (ANALYZE, BUFFERS)
+SELECT * FROM obtener_productos_con_relaciones();
 
 -- Todos los productos
 SELECT * FROM obtener_productos_con_relaciones();
@@ -768,3 +1120,21 @@ SELECT * FROM obtener_productos_con_relaciones(p_nombre_producto => 'café');
 
 -- Un producto específico
 SELECT * FROM obtener_productos_con_relaciones(p_id_producto => 'a1b2c3d4-e5f6-7890-abcd-ef1234567890');
+
+
+select p.precio ,COALESCE(
+            (SELECT 
+                CASE 
+                    WHEN dp.tipo_descuento = 'porcentaje' THEN 
+                        p.precio * (1 - dp.valor/100)
+                    WHEN dp.tipo_descuento = 'fijo' THEN 
+                        GREATEST(p.precio - dp.valor, 0)
+                    ELSE p.precio
+                END
+            FROM descuento_producto dp
+            WHERE dp.id_producto = p.id_producto
+            AND dp.es_activo = TRUE
+            AND CURRENT_TIMESTAMP BETWEEN dp.fecha_inicio AND dp.fecha_fin
+            LIMIT 1),
+            p.precio
+        ) AS "PrecioConDescuento" FROM producto p
