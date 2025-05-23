@@ -119,12 +119,31 @@ CREATE TABLE IF NOT EXISTS producto_preferencia_dietetica (
   creado_por TEXT
 );
 
+-- Tabla intermedia para alergenos de usuario
+CREATE TABLE IF NOT EXISTS usuario_alergeno (
+  id_usuario UUID NOT NULL,
+  id_alergeno UUID REFERENCES alergeno(id_alergeno) ON DELETE CASCADE,
+  PRIMARY KEY (id_usuario, id_alergeno),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
+);
+
+-- Tabla intermedia para preferencias dietéticas de usuario
+CREATE TABLE IF NOT EXISTS usuario_preferencia_dietetica (
+  id_usuario UUID NOT NULL,
+  id_preferencia UUID REFERENCES preferencia_dietetica(id_preferencia) ON DELETE CASCADE,
+  PRIMARY KEY (id_usuario, id_preferencia),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
+);
+
 
 -- Crear tabla pedido
 CREATE TABLE IF NOT EXISTS pedido (
   id_pedido UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   id_usuario UUID NOT NULL,
   metodo_pago tipo_pago NOT NULL,
+  numero_pedido BIGINT NOT NULL,,
   total DECIMAL(10,2) NOT NULL CHECK (total >= 0),
   total_con_descuento DECIMAL(10,2) CHECK (total_con_descuento >= 0),
   fecha_creacion TIMESTAMPTZ DEFAULT now(),
@@ -200,6 +219,29 @@ CREATE TRIGGER actualizar_pedido
   BEFORE UPDATE ON pedido
   FOR EACH ROW
   EXECUTE FUNCTION actualizar_fecha_actualizacion();
+
+-- Creamos una secuencia para generar números de pedido únicos
+CREATE SEQUENCE pedido_numero_seq START 1;
+
+-- Actualizamos los pedidos existentes (opcional)
+UPDATE pedido 
+SET numero_pedido = nextval('pedido_numero_seq')
+WHERE numero_pedido IS NULL;
+
+-- Creamos un trigger para asignar automáticamente el número de pedido
+CREATE OR REPLACE FUNCTION asignar_numero_pedido()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.numero_pedido := nextval('pedido_numero_seq');
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_asignar_numero_pedido
+BEFORE INSERT ON pedido
+FOR EACH ROW
+EXECUTE FUNCTION asignar_numero_pedido();
+
 
  -- Valores unicos
 ALTER TABLE alergeno ADD CONSTRAINT alergeno_nombre_unique UNIQUE (nombre);
@@ -964,9 +1006,9 @@ BEGIN
     -- Insertar múltiples cupones si existen
     IF p_cupones IS NOT NULL THEN
         FOR v_cupon IN SELECT * FROM json_to_recordset(p_cupones) AS (
-            id_cupon UUID,
-            tipo_descuento TEXT,
-            descuento_aplicado DECIMAL
+                "idCupon" UUID,
+			    "tipoDescuento" TEXT,
+    			"descuentoAplicado" DECIMAL
         )
         LOOP
             -- Validar cada cupón
@@ -989,9 +1031,9 @@ BEGIN
                 fecha_creacion
             ) VALUES (
                 v_id_pedido,
-                v_cupon.id_cupon,
-                v_cupon.tipo_descuento,
-                v_cupon.descuento_aplicado,
+		        v_cupon."idCupon",
+		        v_cupon."tipoDescuento",
+		        v_cupon."descuentoAplicado",
                 p_creado_por,
                 NOW()
             );
@@ -1121,7 +1163,6 @@ SELECT * FROM obtener_productos_con_relaciones(p_nombre_producto => 'café');
 -- Un producto específico
 SELECT * FROM obtener_productos_con_relaciones(p_id_producto => 'a1b2c3d4-e5f6-7890-abcd-ef1234567890');
 
-
 select p.precio ,COALESCE(
             (SELECT 
                 CASE 
@@ -1138,3 +1179,341 @@ select p.precio ,COALESCE(
             LIMIT 1),
             p.precio
         ) AS "PrecioConDescuento" FROM producto p
+        
+        
+drop FUNCTION actualizar_alergenos_usuario    
+CREATE OR REPLACE FUNCTION actualizar_alergenos_usuario(
+  p_id_usuario UUID,
+  p_alergenos JSON,
+  p_usuario_accion TEXT
+) RETURNS BOOLEAN AS $$
+BEGIN
+  -- Eliminar todos los alérgenos actuales del usuario
+  DELETE FROM usuario_alergeno 
+  WHERE id_usuario = p_id_usuario;
+  
+  -- Insertar los nuevos alérgenos si el JSON no está vacío
+  IF p_alergenos IS NOT NULL AND json_array_length(p_alergenos) > 0 THEN
+    BEGIN
+      INSERT INTO usuario_alergeno (id_usuario, id_alergeno, creado_por)
+      SELECT p_id_usuario, (value->>'id_alergeno')::UUID, p_usuario_accion
+      FROM json_array_elements(p_alergenos);
+      
+      RETURN true;
+    EXCEPTION WHEN OTHERS THEN
+      RETURN false;
+    END;
+  ELSE
+    RETURN true; -- Operación exitosa (solo eliminación)
+  END IF;
+END;
+$$ LANGUAGE plpgsql;    
+
+drop FUNCTION actualizar_preferencias_dieteticas
+CREATE OR REPLACE FUNCTION actualizar_preferencias_dieteticas(
+  p_id_usuario UUID,
+  p_preferencias JSON,
+  p_usuario_accion TEXT
+) RETURNS BOOLEAN AS $$
+BEGIN
+  -- Eliminar todas las preferencias actuales del usuario
+  DELETE FROM usuario_preferencia_dietetica 
+  WHERE id_usuario = p_id_usuario;
+  
+  -- Insertar las nuevas preferencias si el JSON no está vacío
+  IF p_preferencias IS NOT NULL AND json_array_length(p_preferencias) > 0 THEN
+    BEGIN
+      INSERT INTO usuario_preferencia_dietetica (id_usuario, id_preferencia, creado_por)
+      SELECT p_id_usuario, (value->>'id_preferencia')::UUID, p_usuario_accion
+      FROM json_array_elements(p_preferencias);
+      
+      RETURN true;
+    EXCEPTION WHEN OTHERS THEN
+      RETURN false;
+    END;
+  ELSE
+    RETURN true; -- Operación exitosa (solo eliminación)
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Para actualizar alérgenos
+SELECT actualizar_alergenos_usuario(
+  '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7', 
+  '[{"id_alergeno": "6ddd82cd-5f81-45c4-ae86-86b36468814f"}, {"id_alergeno": "bbebf173-93b8-492f-8f2d-b36a5ec4a6e9"}]',
+  'admin@example.com'
+);
+
+-- Para actualizar preferencias dietéticas
+SELECT actualizar_preferencias_dieteticas(
+  'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11',
+  '[{"id_preferencia": "d5eebc99-9c0b-4ef8-bb6d-6bb9bd380a44"}]',
+  'admin@example.com'
+);
+
+ drop FUNCTION obtener_pedidos_usuario
+
+CREATE OR REPLACE FUNCTION obtener_pedidos_usuario(
+    p_id_usuario UUID
+)
+RETURNS TABLE (
+    numero_pedido BIGINT,
+    id_pedido UUID,
+    estado_actual estado_pedido,
+    productos JSON,
+    total DECIMAL(10,2),
+    total_con_descuento DECIMAL(10,2),
+    fecha_creacion TIMESTAMPTZ,
+    tiempo_transcurrido TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH ultimo_estado AS (
+        SELECT 
+            he.id_pedido, 
+            he.estado,
+            ROW_NUMBER() OVER (PARTITION BY he.id_pedido ORDER BY he.fecha_creacion DESC) AS rn
+        FROM 
+            historial_estado_pedido he
+    ),
+    tiempo_transcurrido AS (
+        SELECT 
+            p.id_pedido,
+            CASE 
+                WHEN EXTRACT(DAY FROM (now() - p.fecha_creacion)) > 0 THEN
+                    'hace ' || EXTRACT(DAY FROM (now() - p.fecha_creacion)) || ' días • ' || 
+                    to_char(p.fecha_creacion, 'DD Mon, HH:MI a.m.')
+                WHEN EXTRACT(HOUR FROM (now() - p.fecha_creacion)) > 0 THEN
+                    'hace ' || EXTRACT(HOUR FROM (now() - p.fecha_creacion)) || ' horas • ' || 
+                    to_char(p.fecha_creacion, 'DD Mon, HH:MI a.m.')
+                ELSE
+                    'hace ' || EXTRACT(MINUTE FROM (now() - p.fecha_creacion)) || ' minutos • ' || 
+                    to_char(p.fecha_creacion, 'DD Mon, HH:MI a.m.')
+            END AS tiempo_formateado
+        FROM 
+            pedido p
+        WHERE 
+            p.id_usuario = p_id_usuario
+    ),
+    productos_pedido AS (
+        SELECT 
+            dp.id_pedido,
+            json_agg(json_build_object(
+                'imagen', pi.url_imagen,
+                'cantidad', dp.cantidad,
+                'nombre', pr.nombre,
+                'precio_unitario', dp.precio_unitario
+            )) AS productos_json
+        FROM 
+            detalle_pedido dp
+        LEFT JOIN 
+            producto_imagen pi ON dp.id_producto = pi.id_producto AND pi.es_principal = TRUE
+        JOIN
+            producto pr ON dp.id_producto = pr.id_producto
+        GROUP BY 
+            dp.id_pedido
+    )
+    SELECT 
+        p.numero_pedido,
+        p.id_pedido,
+        ue.estado,
+        COALESCE(pp.productos_json, '[]'::json),
+        p.total,
+        p.total_con_descuento,
+        p.fecha_creacion,
+        tt.tiempo_formateado
+    FROM 
+        pedido p
+    JOIN 
+        ultimo_estado ue ON p.id_pedido = ue.id_pedido AND ue.rn = 1
+    JOIN 
+        tiempo_transcurrido tt ON p.id_pedido = tt.id_pedido
+    LEFT JOIN 
+        productos_pedido pp ON p.id_pedido = pp.id_pedido
+    WHERE 
+        p.id_usuario = p_id_usuario
+    ORDER BY 
+        p.fecha_creacion DESC;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT * FROM obtener_pedidos_usuario('a1b2c3d4-e5f6-7890-1234-567890abcdef');
+
+SELECT 
+    id_pedido as IdPedido,
+    numero_pedido as NumeroPedido,
+    estado_actual as EstadoActual,
+    productos as Productos,
+    total as Total,
+    total_con_descuento as TotalConDescuento,
+    fecha_creacion as FechaCreacion,
+    tiempo_transcurrido as TiempoTranscurrido
+FROM obtener_pedidos_usuario('a1b2c3d4-e5f6-7890-1234-567890abcdef');
+
+drop FUNCTION obtener_detalle_pedido
+--Obtener detalle de pedido
+CREATE OR REPLACE FUNCTION obtener_detalle_pedido(
+    p_id_pedido UUID
+)
+RETURNS TABLE (
+    numero_pedido BIGINT,
+    id_pedido UUID,
+    estado_actual estado_pedido,
+    estados JSON,
+    productos JSON,
+    cupones JSON,
+    total DECIMAL(10,2),
+    total_con_descuento DECIMAL(10,2),
+    metodo_pago tipo_pago,
+    fecha_creacion TIMESTAMPTZ,
+    tiempo_transcurrido TEXT
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH estados_pedido AS (
+        SELECT 
+            he.estado,
+            he.fecha_creacion,
+            to_char(he.fecha_creacion, 'DD Mon, HH:MI a.m.') AS fecha_formateada
+        FROM 
+            historial_estado_pedido he
+        WHERE 
+            he.id_pedido = p_id_pedido
+        ORDER BY 
+            he.fecha_creacion
+    ),
+    tiempo_calculado AS (
+        SELECT 
+            CASE 
+                WHEN EXTRACT(DAY FROM (now() - MIN(hep.fecha_creacion))) > 0 THEN
+                    'hace ' || EXTRACT(DAY FROM (now() - MIN(hep.fecha_creacion))) || ' días • ' || 
+                    to_char(MIN(hep.fecha_creacion), 'DD Mon, HH:MI a.m.')
+                WHEN EXTRACT(HOUR FROM (now() - MIN(hep.fecha_creacion))) > 0 THEN
+                    'hace ' || EXTRACT(HOUR FROM (now() - MIN(hep.fecha_creacion))) || ' horas • ' || 
+                    to_char(MIN(hep.fecha_creacion), 'DD Mon, HH:MI a.m.')
+                ELSE
+                    'hace ' || EXTRACT(MINUTE FROM (now() - MIN(hep.fecha_creacion))) || ' minutos • ' || 
+                    to_char(MIN(hep.fecha_creacion), 'DD Mon, HH:MI a.m.')
+            END AS tiempo_formateado
+        FROM 
+            historial_estado_pedido hep 
+        WHERE 
+            hep.id_pedido = p_id_pedido
+    ),
+    productos_con_imagenes AS (
+        SELECT
+            dp.id_pedido,
+            json_agg(
+                json_build_object(
+                    'id_producto', dp.id_producto,
+                    'nombre', pr.nombre,
+                    'cantidad', dp.cantidad,
+                    'precio_unitario', dp.precio_unitario,
+                    'subtotal', (dp.cantidad * dp.precio_unitario)::DECIMAL(10,2),
+                    'imagenes', (
+                        SELECT COALESCE(
+                            json_agg(
+                                json_build_object(
+                                    'url', pi.url_imagen,
+                                    'orden', pi.orden,
+                                    'es_principal', pi.es_principal
+                                ) ORDER BY pi.orden
+                            ),
+                            '[]'::json
+                        )
+                        FROM producto_imagen pi
+                        WHERE pi.id_producto = dp.id_producto
+                    )
+                )
+            ) AS productos_json
+        FROM
+            detalle_pedido dp
+        JOIN
+            producto pr ON dp.id_producto = pr.id_producto
+        WHERE
+            dp.id_pedido = p_id_pedido
+        GROUP BY
+            dp.id_pedido
+    )
+    SELECT 
+        p.numero_pedido,
+        p.id_pedido,
+        (SELECT ep.estado FROM estados_pedido ep ORDER BY ep.fecha_creacion DESC LIMIT 1)::estado_pedido,
+        (SELECT json_agg(json_build_object(
+            'estado', ep.estado,
+            'fecha', ep.fecha_formateada,
+            'completado', true
+        )) FROM estados_pedido ep)::JSON,
+        COALESCE(pci.productos_json, '[]'::json),
+        (SELECT json_agg(json_build_object(
+            'codigo', c.codigo,
+            'tipo_descuento', pc.tipo_descuento,
+            'descuento_aplicado', pc.descuento_aplicado,
+            'descripcion', CASE pc.tipo_descuento
+                WHEN 'porcentaje' THEN pc.descuento_aplicado || '% de descuento'
+                ELSE 'Descuento de $' || pc.descuento_aplicado
+            END
+        )) FROM pedido_cupon pc
+        JOIN cupon c ON pc.id_cupon = c.id_cupon
+        WHERE pc.id_pedido = p.id_pedido)::JSON,
+        p.total,
+        p.total_con_descuento,
+        p.metodo_pago,
+        p.fecha_creacion,
+        tc.tiempo_formateado
+    FROM 
+        pedido p
+    CROSS JOIN
+        tiempo_calculado tc
+    LEFT JOIN
+        productos_con_imagenes pci ON p.id_pedido = pci.id_pedido
+    WHERE 
+        p.id_pedido = p_id_pedido;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+SELECT 
+    id_pedido as IdPedido,
+    numero_pedido as NumeroPedido,
+    estado_actual as EstadoActual,
+    estados as Estados,
+    productos as Productos,
+    cupones as Cupones,
+    total as Total,
+    total_con_descuento as TotalConDescuento,
+    metodo_pago as MetodoPago,
+    fecha_creacion as FechaCreacion,
+    tiempo_transcurrido as TiempoTranscurrido
+FROM obtener_detalle_pedido('1c74bc8e-eaa6-4fb5-b5aa-81f88a2ee4db');
+
+SELECT obtener_detalle_pedido(
+  '1c74bc8e-eaa6-4fb5-b5aa-81f88a2ee4db'
+);
+
+
+
+
+SELECT 
+                            a.id_alergeno AS IdAlergeno,
+                            a.nombre AS Nombre,
+                            a.fecha_creacion AS FechaCreacion,
+                            a.creado_por AS CreadoPor,
+                            a.fecha_actualizacion AS FechaActualizacion,
+                            a.actualizado_por AS ActualizadoPor
+                        FROM alergeno a
+                        JOIN usuario_alergeno ua ON a.id_alergeno = ua.id_alergeno
+                        WHERE ua.id_usuario = '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7';
+                        
+                        -- Obtener preferencias del usuario
+                        SELECT 
+                            p.id_preferencia AS IdPreferencia,
+                            p.nombre AS Nombre,
+                            p.fecha_creacion AS FechaCreacion,
+                            p.creado_por AS CreadoPor,
+                            p.fecha_actualizacion AS FechaActualizacion,
+                            p.actualizado_por AS ActualizadoPor
+                        FROM preferencia_dietetica p
+                        JOIN usuario_preferencia_dietetica upd ON p.id_preferencia = upd.id_preferencia
+                        WHERE upd.id_usuario = '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7';
