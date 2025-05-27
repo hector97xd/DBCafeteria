@@ -1,7 +1,7 @@
 CREATE DATABASE CAFETERIA;
 
 -- Crear tipos personalizados
-CREATE TYPE estado_pedido AS ENUM ('Recibido', 'Preparando', 'Listo', 'Completado');
+CREATE TYPE estado_pedido AS ENUM ('Recibido', 'Preparando', 'Listo', 'Entregado','Cancelado');
 CREATE TYPE tipo_pago AS ENUM ('Efectivo', 'Tarjeta');
 
 -- Crear tabla categoria
@@ -146,6 +146,10 @@ CREATE TABLE IF NOT EXISTS pedido (
   numero_pedido BIGINT NOT NULL,,
   total DECIMAL(10,2) NOT NULL CHECK (total >= 0),
   total_con_descuento DECIMAL(10,2) CHECK (total_con_descuento >= 0),
+  fecha_recibido TIMESTAMPTZ,
+  tiempo_estimado_entrega TIMESTAMPTZ,
+  fecha_entrega TIMESTAMPTZ,
+  tiempo_real_preparacion_minutos numeric, 
   fecha_creacion TIMESTAMPTZ DEFAULT now(),
   creado_por TEXT,
   fecha_actualizacion TIMESTAMPTZ null,
@@ -199,6 +203,7 @@ CREATE TABLE IF NOT EXISTS historial_estado_pedido (
   fecha_creacion TIMESTAMPTZ DEFAULT now(),
   creado_por TEXT
 );
+
 
 -- Función para actualizar fecha_actualizacion
 CREATE OR REPLACE FUNCTION actualizar_fecha_actualizacion()
@@ -945,7 +950,15 @@ END;
 $$ LANGUAGE plpgsql;
 
 --Registro de recepcion pedidos
-drop FUNCTION registrar_pedido_completo 
+DROP FUNCTION registrar_pedido_completo(
+    p_id_usuario UUID,
+    p_metodo_pago tipo_pago,
+    p_total DECIMAL,
+    p_total_con_descuento DECIMAL,
+    p_creado_por TEXT,
+    p_detalles JSON,
+    p_cupones JSON
+);
 CREATE OR REPLACE FUNCTION registrar_pedido_completo(
     p_id_usuario UUID,
     p_metodo_pago tipo_pago,
@@ -956,9 +969,9 @@ CREATE OR REPLACE FUNCTION registrar_pedido_completo(
     p_cupones JSON DEFAULT NULL  -- Nuevo parámetro para múltiples cupones
 )
 RETURNS TABLE (
-    id_pedido UUID,
-    mensaje TEXT,
-    exito BOOLEAN
+    IdPedido UUID,
+    Mensaje TEXT,
+    Exito BOOLEAN
 ) AS $$
 DECLARE
     v_id_pedido UUID := gen_random_uuid();
@@ -1006,18 +1019,18 @@ BEGIN
     -- Insertar múltiples cupones si existen
     IF p_cupones IS NOT NULL THEN
         FOR v_cupon IN SELECT * FROM json_to_recordset(p_cupones) AS (
-                "idCupon" UUID,
-			    "tipoDescuento" TEXT,
-    			"descuentoAplicado" DECIMAL
+                "IdCupon" UUID,
+			    "TipoDescuento" TEXT,
+    			"DescuentoAplicado" DECIMAL
         )
         LOOP
             -- Validar cada cupón
-            IF v_cupon.descuento_aplicado < 0 THEN
+            IF v_cupon."DescuentoAplicado" < 0 THEN
                 RETURN QUERY SELECT NULL::UUID, 'El descuento aplicado no puede ser negativo', FALSE;
                 RETURN;
             END IF;
             
-            IF v_cupon.tipo_descuento NOT IN ('fijo', 'porcentaje') THEN
+            IF v_cupon."TipoDescuento" NOT IN ('fijo', 'porcentaje') THEN
                 RETURN QUERY SELECT NULL::UUID, 'Tipo de descuento no válido. Debe ser "fijo" o "porcentaje"', FALSE;
                 RETURN;
             END IF;
@@ -1031,9 +1044,9 @@ BEGIN
                 fecha_creacion
             ) VALUES (
                 v_id_pedido,
-		        v_cupon."idCupon",
-		        v_cupon."tipoDescuento",
-		        v_cupon."descuentoAplicado",
+		        v_cupon."IdCupon",
+		        v_cupon."TipoDescuento",
+		        v_cupon."DescuentoAplicado",
                 p_creado_por,
                 NOW()
             );
@@ -1121,28 +1134,6 @@ SELECT * FROM registrar_pedido_completo(
     p_id_cupon := NULL,
     p_tipo_descuento := NULL,
     p_descuento_aplicado := NULL
-);
---multiples cupones
-SELECT * FROM registrar_pedido_completo(
-    'a1b2c3d4-e5f6-7890-1234-567890abcdef',  -- id_usuario
-    'Efectivo',                              -- metodo_pago
-    200.00,                                  -- total
-    150.00,                                  -- total_con_descuento
-    'cliente@email.com',                     -- creado_por
-    '[{
-        "id_producto": "41a196cd-47fc-42ed-964d-5eccf2eb15a2",
-        "cantidad": 2,
-        "precio_unitario": 50.00
-    }, {
-        "id_producto": "bdff35d6-0e47-441e-b9c5-7596cde586fc",
-        "cantidad": 1,
-        "precio_unitario": 100.00
-    }]',
-    '[{
-        "id_cupon": "04f5318d-cb7f-4255-ab92-5721b3ca34d7",
-        "tipo_descuento": "porcentaje",
-        "descuento_aplicado": 20.00
-    }]'
 );
 
 EXPLAIN (ANALYZE, BUFFERS)
@@ -1486,34 +1477,382 @@ SELECT
     metodo_pago as MetodoPago,
     fecha_creacion as FechaCreacion,
     tiempo_transcurrido as TiempoTranscurrido
-FROM obtener_detalle_pedido('1c74bc8e-eaa6-4fb5-b5aa-81f88a2ee4db');
+FROM obtener_detalle_pedido('de33cf78-768f-490d-b4e5-11a801e1ac1d');
 
 SELECT obtener_detalle_pedido(
   '1c74bc8e-eaa6-4fb5-b5aa-81f88a2ee4db'
 );
 
 
+CREATE OR REPLACE FUNCTION calcular_tiempo_estimado_restante(
+    p_id_pedido UUID
+) 
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_tiempo_estimado_total NUMERIC;
+    v_tiempo_transcurrido NUMERIC;
+    v_tiempo_restante INTEGER;
+    v_estado_actual estado_pedido;
+    v_fecha_creacion TIMESTAMPTZ;
+    v_fecha_entrega_estimada TIMESTAMPTZ;
+BEGIN
+    -- Obtener estado actual, fecha creación y tiempo estimado
+    SELECT 
+        h.estado,
+        p.fecha_creacion,
+        EXTRACT(EPOCH FROM (p.tiempo_estimado_entrega - p.fecha_creacion))/60,
+        p.tiempo_estimado_entrega
+    INTO 
+        v_estado_actual,
+        v_fecha_creacion,
+        v_tiempo_estimado_total,
+        v_fecha_entrega_estimada
+    FROM pedido p
+    JOIN (
+        SELECT id_pedido, estado
+        FROM historial_estado_pedido
+        WHERE (id_pedido, fecha_creacion) IN (
+            SELECT id_pedido, MAX(fecha_creacion)
+            FROM historial_estado_pedido
+            GROUP BY id_pedido
+        )
+    ) h ON p.id_pedido = h.id_pedido
+    WHERE p.id_pedido = p_id_pedido;
+    
+    -- Si ya está completado o cancelado, retornar 0
+    IF v_estado_actual IN ('Listo', 'Cancelado') THEN
+        RETURN 0;
+    END IF;
+    
+    -- Si no hay tiempo estimado, retornar NULL
+    IF v_fecha_entrega_estimada IS NULL THEN
+        RETURN NULL;
+    END IF;
+    
+    -- Calcular tiempo transcurrido en minutos
+    v_tiempo_transcurrido := EXTRACT(EPOCH FROM (now() - v_fecha_creacion)) / 60;
+    
+    -- Calcular tiempo restante (no menos que 0)
+    v_tiempo_restante := GREATEST(ROUND(v_tiempo_estimado_total - v_tiempo_transcurrido), 0);
+    
+    RETURN v_tiempo_restante;
+END;
+$$; 
+
+CREATE OR REPLACE FUNCTION calcular_promedios_preparacion()
+RETURNS TABLE (
+    promedio_hoy NUMERIC,
+    promedio_ayer NUMERIC,
+    promedio_semana NUMERIC,
+    total_pedidos_hoy BIGINT,
+    desviacion_estandar NUMERIC
+) LANGUAGE plpgsql AS $$
+BEGIN
+    -- Promedio del día actual (desde recibido hasta completado)
+    SELECT 
+        COALESCE(AVG(EXTRACT(EPOCH FROM (hep_completado.fecha_creacion - hep_recibido.fecha_creacion)) / 60), 15),
+        COUNT(*),
+        COALESCE(STDDEV(EXTRACT(EPOCH FROM (hep_completado.fecha_creacion - hep_recibido.fecha_creacion)) / 60), 0)
+    INTO promedio_hoy, total_pedidos_hoy, desviacion_estandar
+    FROM historial_estado_pedido hep_recibido
+    JOIN historial_estado_pedido hep_completado 
+        ON hep_recibido.id_pedido = hep_completado.id_pedido
+    WHERE hep_recibido.estado = 'Recibido'
+      AND hep_completado.estado = 'Listo'
+      AND DATE(hep_recibido.fecha_creacion) = CURRENT_DATE;
+
+    -- Promedio del día anterior
+    SELECT 
+        AVG(EXTRACT(EPOCH FROM (hep_completado.fecha_creacion - hep_recibido.fecha_creacion)) / 60)
+    INTO promedio_ayer
+    FROM historial_estado_pedido hep_recibido
+    JOIN historial_estado_pedido hep_completado 
+        ON hep_recibido.id_pedido = hep_completado.id_pedido
+    WHERE hep_recibido.estado = 'Recibido'
+      AND hep_completado.estado = 'Listo'
+      AND DATE(hep_recibido.fecha_creacion) = CURRENT_DATE - INTERVAL '1 day';
+
+    -- Promedio de los últimos 7 días
+    SELECT 
+        AVG(EXTRACT(EPOCH FROM (hep_completado.fecha_creacion - hep_recibido.fecha_creacion)) / 60)
+    INTO promedio_semana
+    FROM historial_estado_pedido hep_recibido
+    JOIN historial_estado_pedido hep_completado 
+        ON hep_recibido.id_pedido = hep_completado.id_pedido
+    WHERE hep_recibido.estado = 'Recibido'
+      AND hep_completado.estado = 'Listo'
+      AND hep_recibido.fecha_creacion >= CURRENT_DATE - INTERVAL '7 days';
+
+    RETURN NEXT;
+END;
+$$;
 
 
+drop FUNCTION actualizar_estado_pedido
+CREATE OR REPLACE FUNCTION actualizar_estado_pedido(
+    p_id_pedido UUID,
+    p_estado estado_pedido,
+    p_usuario TEXT
+) 
+RETURNS TABLE (
+    id_pedido UUID,
+    estado TEXT,
+    eta_minutos INT,
+    tiempo_restante_minutos INT,
+    tiempo_real_minutos NUMERIC,
+    porcentaje_completado NUMERIC,
+    mensaje TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_tiempo_estimado INTEGER := 15;
+    v_promedio_actual NUMERIC;
+    v_desviacion_estandar NUMERIC;
+    v_total_pedidos_hoy INT;
+    v_promedio_ayer NUMERIC;
+    v_fecha_creacion TIMESTAMPTZ;
+    v_tiempo_real NUMERIC := NULL;
+    v_porcentaje NUMERIC := NULL;
+BEGIN
+    -- Insertar en historial
+    INSERT INTO historial_estado_pedido(id_pedido, estado, creado_por)
+    VALUES (p_id_pedido, p_estado, p_usuario);
+
+    -- Obtener fecha de creación del pedido
+    SELECT ped.fecha_creacion INTO v_fecha_creacion
+    FROM pedido ped
+    WHERE ped.id_pedido = p_id_pedido;
+
+    -- Si estado = 'Preparando', calcular ETA basado en estadísticas
+    IF p_estado = 'Preparando' THEN
+        -- Obtener datos del día actual
+        SELECT 
+            AVG(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60),
+            STDDEV(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60),
+            COUNT(*)
+        INTO v_promedio_actual, v_desviacion_estandar, v_total_pedidos_hoy
+        FROM historial_estado_pedido h
+        JOIN pedido ped ON h.id_pedido = ped.id_pedido
+        WHERE h.estado = 'Listo'
+          AND DATE(ped.fecha_creacion) = CURRENT_DATE;
+
+        IF v_total_pedidos_hoy >= 3 AND v_promedio_actual IS NOT NULL THEN
+            v_tiempo_estimado := ROUND(v_promedio_actual + COALESCE(v_desviacion_estandar, 0) * 0.5);
+        ELSE
+            -- Obtener promedio del día anterior si hoy no hay suficientes datos
+            SELECT AVG(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60)
+            INTO v_promedio_ayer
+            FROM historial_estado_pedido h
+            JOIN pedido ped ON h.id_pedido = ped.id_pedido
+            WHERE h.estado = 'Listo'
+              AND DATE(ped.fecha_creacion) = CURRENT_DATE - INTERVAL '1 day';
+
+            IF v_promedio_ayer IS NOT NULL THEN
+                v_tiempo_estimado := ROUND(v_promedio_ayer * 1.2);
+            END IF;
+        END IF;
+
+        -- Guardar ETA en tabla pedido
+        UPDATE pedido
+        SET tiempo_estimado_entrega = now() + (v_tiempo_estimado || ' minutes')::INTERVAL
+        WHERE pedido.id_pedido = p_id_pedido;
+
+    ELSIF p_estado = 'Listo' THEN
+        -- Calcular tiempo real de preparación
+        v_tiempo_real := EXTRACT(EPOCH FROM (now() - v_fecha_creacion)) / 60;
+        UPDATE pedido
+        SET 
+            fecha_entrega = now(),
+            tiempo_real_preparacion_minutos = v_tiempo_real
+        WHERE pedido.id_pedido = p_id_pedido;
+    END IF;
+
+    -- Calcular porcentaje completado
+    IF p_estado NOT IN ('Listo', 'Cancelado') THEN
+        SELECT 
+            ROUND(
+                (EXTRACT(EPOCH FROM (now() - p.fecha_creacion)) / 
+                NULLIF(EXTRACT(EPOCH FROM (p.tiempo_estimado_entrega - p.fecha_creacion)), 0)) * 100, 
+                1
+            )
+        INTO v_porcentaje
+        FROM pedido p
+        WHERE p.id_pedido = p_id_pedido;
+    ELSE
+        v_porcentaje := 100;
+    END IF;
+
+    -- Retornar resumen sin ambigüedad
+    RETURN QUERY
+    SELECT * FROM (
+        VALUES (
+            p_id_pedido,
+            p_estado::TEXT,
+            v_tiempo_estimado,
+            calcular_tiempo_estimado_restante(p_id_pedido),
+            v_tiempo_real,
+            v_porcentaje,
+            'Estado actualizado correctamente.'::TEXT
+        )
+    ) AS result(
+        id_pedido, 
+        estado, 
+        eta_minutos, 
+        tiempo_restante_minutos, 
+        tiempo_real_minutos, 
+        porcentaje_completado, 
+        mensaje
+    );
+END;
+$$;
+
+
+
+CREATE OR REPLACE VIEW vista_monitoreo_pedidos AS
 SELECT 
-                            a.id_alergeno AS IdAlergeno,
-                            a.nombre AS Nombre,
-                            a.fecha_creacion AS FechaCreacion,
-                            a.creado_por AS CreadoPor,
-                            a.fecha_actualizacion AS FechaActualizacion,
-                            a.actualizado_por AS ActualizadoPor
-                        FROM alergeno a
-                        JOIN usuario_alergeno ua ON a.id_alergeno = ua.id_alergeno
-                        WHERE ua.id_usuario = '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7';
+    p.id_pedido,
+    p.numero_pedido,
+    he.estado AS estado_actual,
+    p.fecha_creacion AS fecha_recibido,
+    
+    -- Tiempo estimado total (minutos)
+    EXTRACT(EPOCH FROM (p.tiempo_estimado_entrega - p.fecha_creacion))/60 AS eta_total_minutos,
+    
+    -- Tiempo transcurrido (minutos)
+    CASE 
+        WHEN he.estado NOT IN ('Listo', 'Cancelado') THEN 
+            EXTRACT(EPOCH FROM (now() - p.fecha_creacion))/60 
+        ELSE NULL 
+    END AS minutos_transcurridos,
+    
+    -- Tiempo restante estimado (minutos)
+    calcular_tiempo_estimado_restante(p.id_pedido) AS minutos_restantes,
+    
+    -- Porcentaje completado
+    CASE 
+        WHEN he.estado NOT IN ('Listo', 'Cancelado') THEN 
+            ROUND(
+                (EXTRACT(EPOCH FROM (now() - p.fecha_creacion)) / 
+                EXTRACT(EPOCH FROM (p.tiempo_estimado_entrega - p.fecha_creacion)) * 100)::numeric, 
+                1
+            )
+        WHEN he.estado = 'Listo' THEN 100
+        ELSE 0 
+    END AS porcentaje_completado,
+    
+    -- Tiempo real (solo para completados)
+    p.tiempo_real_preparacion_minutos,
+    
+    -- Diferencia entre estimado y real
+    CASE 
+        WHEN he.estado = 'Listo' THEN 
+            p.tiempo_real_preparacion_minutos - EXTRACT(EPOCH FROM (p.tiempo_estimado_entrega - p.fecha_creacion))/60
+        ELSE NULL 
+    END AS diferencia_minutos
+
+FROM pedido p
+JOIN (
+    SELECT id_pedido, estado
+    FROM historial_estado_pedido
+    WHERE (id_pedido, fecha_creacion) IN (
+        SELECT id_pedido, MAX(fecha_creacion)
+        FROM historial_estado_pedido
+        GROUP BY id_pedido
+    )
+) he ON p.id_pedido = he.id_pedido;
+
+
+CREATE OR REPLACE FUNCTION recalcular_tiempos_estimados()
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_promedio_actual NUMERIC;
+    v_desviacion_estandar NUMERIC;
+    v_total_pedidos_hoy BIGINT;
+    v_pedidos_actualizados INTEGER := 0;
+BEGIN
+    -- Obtener estadísticas actuales
+    SELECT 
+        promedio_hoy, 
+        desviacion_estandar, 
+        total_pedidos_hoy 
+    INTO 
+        v_promedio_actual, 
+        v_desviacion_estandar, 
+        v_total_pedidos_hoy
+    FROM calcular_promedios_preparacion();
+    
+    -- Calcular nuevo tiempo estimado considerando desviación estándar
+    IF v_total_pedidos_hoy >= 3 THEN
+        v_promedio_actual := v_promedio_actual + (v_desviacion_estandar * 0.3); -- Margen más ajustado
+    ELSE
+        -- Si no hay suficientes datos hoy, usar promedio de ayer con margen
+        SELECT promedio_ayer INTO v_promedio_actual FROM calcular_promedios_preparacion();
+        v_promedio_actual := COALESCE(v_promedio_actual, 30) * 1.1; -- 10% más
+    END IF;
+    
+    -- Actualizar pedidos en estado 'Recibido' o 'Preparando'
+    UPDATE pedido p
+    SET 
+        tiempo_estimado_entrega = p.fecha_creacion + (ROUND(v_promedio_actual) || ' minutes')::INTERVAL,
+        fecha_actualizacion = now(),
+        actualizado_por = 'sistema'
+    FROM (
+        SELECT id_pedido
+        FROM historial_estado_pedido
+        WHERE (id_pedido, fecha_creacion) IN (
+            SELECT id_pedido, MAX(fecha_creacion)
+            FROM historial_estado_pedido
+            GROUP BY id_pedido
+        )
+        AND estado IN ('Recibido', 'Preparando')
+    ) he
+    WHERE p.id_pedido = he.id_pedido;
+    
+    GET DIAGNOSTICS v_pedidos_actualizados = ROW_COUNT;
+    
+    RETURN v_pedidos_actualizados;
+END;
+$$;
+
                         
-                        -- Obtener preferencias del usuario
-                        SELECT 
-                            p.id_preferencia AS IdPreferencia,
-                            p.nombre AS Nombre,
-                            p.fecha_creacion AS FechaCreacion,
-                            p.creado_por AS CreadoPor,
-                            p.fecha_actualizacion AS FechaActualizacion,
-                            p.actualizado_por AS ActualizadoPor
-                        FROM preferencia_dietetica p
-                        JOIN usuario_preferencia_dietetica upd ON p.id_preferencia = upd.id_preferencia
-                        WHERE upd.id_usuario = '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7';
+--Examples:
+-- Pedido 1 - Hoy a las 12:00
+INSERT INTO pedido (
+    id_pedido, id_usuario, metodo_pago, numero_pedido, total, total_con_descuento, fecha_creacion, creado_por
+)
+VALUES (
+    '11111111-1111-1111-1111-111111111111', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    'Efectivo', 1001, 10.00, 10.00,
+    now() - INTERVAL '2 hours', 'sistema'
+);
+
+select * from calcular_promedios_preparacion()
+SELECT * from actualizar_estado_pedido('7448a06e-7628-4b0f-bb6a-28de14d85e69', 'Preparando', 'usuario1');
+SELECT * from actualizar_estado_pedido('debe36a3-c09d-4886-83fd-72153f18e088', 'Listo', 'usuario1');
+
+
+SELECT * from actualizar_estado_pedido('5dade527-c0fe-4567-816f-ffc927640d1d', 'Preparando', 'usuario1');
+SELECT * from actualizar_estado_pedido('f9fb7151-5d51-43cf-b6c3-77adcc1d346d', 'Preparando', 'usuario1');
+
+SELECT * from actualizar_estado_pedido('4abaf465-f809-4722-8ccb-37b2ca066a79', 'Listo', 'usuario1');
+SELECT * from actualizar_estado_pedido('f9fb7151-5d51-43cf-b6c3-77adcc1d346d', 'Cancelado', 'usuario1');
+
+SELECT * from actualizar_estado_pedido('826ad5d2-32cc-4c00-83a7-e2eff3d8244d', 'Listo', 'usuario1');
+SELECT * from actualizar_estado_pedido('826ad5d2-32cc-4c00-83a7-e2eff3d8244d', 'Entregado', 'usuario1');
+select * from recalcular_tiempos_estimados()
+
+select * from vista_monitoreo_pedidos
+select * from calcular_tiempo_estimado_restante('7448a06e-7628-4b0f-bb6a-28de14d85e69') 
+select * from calcular_tiempo_estimado_restante('5dade527-c0fe-4567-816f-ffc927640d1d') 
+
+
+-- Pedido 1 completado (tiempo total: 30 min)
+
+
+ 
+                        
