@@ -966,7 +966,7 @@ CREATE OR REPLACE FUNCTION registrar_pedido_completo(
     p_total_con_descuento DECIMAL,
     p_creado_por TEXT,
     p_detalles JSON,
-    p_cupones JSON DEFAULT NULL  -- Nuevo parámetro para múltiples cupones
+    p_cupones JSON DEFAULT NULL
 )
 RETURNS TABLE (
     IdPedido UUID,
@@ -979,15 +979,13 @@ DECLARE
     v_cupon RECORD;
     v_error_context TEXT;
 BEGIN
-    -- Validaciones iniciales (igual que antes)
+    -- Validación inicial
     IF p_total <= 0 THEN
         RETURN QUERY SELECT NULL::UUID, 'El total del pedido debe ser mayor que cero', FALSE;
         RETURN;
     END IF;
-    
-    -- Resto de validaciones...
 
-    -- Insertar pedido (igual que antes)
+    -- Insertar pedido
     INSERT INTO pedido (
         id_pedido,
         id_usuario,
@@ -1006,30 +1004,57 @@ BEGIN
         NOW()
     );
 
-    -- Insertar detalles (igual que antes)
+    -- Insertar detalles
     FOR v_detalle IN SELECT * FROM json_to_recordset(p_detalles) AS (
-        id_producto UUID,
-        cantidad INTEGER,
-        precio_unitario DECIMAL
+        "IdProducto" UUID,
+        "Cantidad" INTEGER,
+        "PrecioUnitario" DECIMAL
     )
     LOOP
-        -- Validaciones y inserción...
+        IF v_detalle."Cantidad" <= 0 THEN
+            RETURN QUERY SELECT NULL::UUID, 'La cantidad debe ser mayor que cero', FALSE;
+            RETURN;
+        END IF;
+
+        IF v_detalle."PrecioUnitario" < 0 THEN
+            RETURN QUERY SELECT NULL::UUID, 'El precio unitario no puede ser negativo', FALSE;
+            RETURN;
+        END IF;
+
+        INSERT INTO detalle_pedido (
+            id_pedido,
+            id_producto,
+            cantidad,
+            precio_unitario,
+            creado_por,
+            fecha_creacion,
+            actualizado_por,
+            fecha_actualizacion
+        ) VALUES (
+            v_id_pedido,
+            v_detalle."IdProducto",
+            v_detalle."Cantidad",
+            v_detalle."PrecioUnitario",
+            p_creado_por,
+            NOW(),
+            p_creado_por,
+            NOW()
+        );
     END LOOP;
 
-    -- Insertar múltiples cupones si existen
+    -- Insertar cupones
     IF p_cupones IS NOT NULL THEN
         FOR v_cupon IN SELECT * FROM json_to_recordset(p_cupones) AS (
-                "IdCupon" UUID,
-			    "TipoDescuento" TEXT,
-    			"DescuentoAplicado" DECIMAL
+            "IdCupon" UUID,
+            "TipoDescuento" TEXT,
+            "DescuentoAplicado" DECIMAL
         )
         LOOP
-            -- Validar cada cupón
             IF v_cupon."DescuentoAplicado" < 0 THEN
                 RETURN QUERY SELECT NULL::UUID, 'El descuento aplicado no puede ser negativo', FALSE;
                 RETURN;
             END IF;
-            
+
             IF v_cupon."TipoDescuento" NOT IN ('fijo', 'porcentaje') THEN
                 RETURN QUERY SELECT NULL::UUID, 'Tipo de descuento no válido. Debe ser "fijo" o "porcentaje"', FALSE;
                 RETURN;
@@ -1044,41 +1069,32 @@ BEGIN
                 fecha_creacion
             ) VALUES (
                 v_id_pedido,
-		        v_cupon."IdCupon",
-		        v_cupon."TipoDescuento",
-		        v_cupon."DescuentoAplicado",
+                v_cupon."IdCupon",
+                v_cupon."TipoDescuento",
+                v_cupon."DescuentoAplicado",
                 p_creado_por,
                 NOW()
             );
         END LOOP;
     END IF;
 
-    -- Insertar historial de estado (igual que antes)
-    INSERT INTO historial_estado_pedido (
-        id_pedido,
-        estado,
-        creado_por,
-        fecha_creacion
-    ) VALUES (
-        v_id_pedido,
-        'Recibido',
-        p_creado_por,
-        NOW()
-    );
+	PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Recibido', p_creado_por);
 
     RETURN QUERY SELECT v_id_pedido, 
-                    'Pedido registrado correctamente con ' || 
-                    json_array_length(p_detalles) || ' detalles y ' ||
-                    COALESCE(json_array_length(p_cupones), 0) || ' cupones', 
-                    TRUE;
+        'Pedido registrado correctamente con ' || 
+        json_array_length(p_detalles) || ' detalles y ' || 
+        COALESCE(json_array_length(p_cupones), 0) || ' cupones',
+        TRUE;
+
 EXCEPTION WHEN OTHERS THEN
     GET STACKED DIAGNOSTICS v_error_context = PG_EXCEPTION_CONTEXT;
-    RETURN QUERY SELECT NULL::UUID, 
-                    'Error al registrar el pedido: ' || SQLERRM || 
-                    ' - Contexto: ' || v_error_context, 
-                    FALSE;
+    RETURN QUERY SELECT NULL::UUID,
+        'Error al registrar el pedido: ' || SQLERRM || 
+        ' - Contexto: ' || v_error_context,
+        FALSE;
 END;
 $$ LANGUAGE plpgsql;
+
 
 SELECT * FROM registrar_pedido_completo(
     -- ID de usuario (ejemplo)
@@ -1273,18 +1289,16 @@ BEGIN
             CASE 
                 WHEN EXTRACT(DAY FROM (now() - p.fecha_creacion)) > 0 THEN
                     'hace ' || EXTRACT(DAY FROM (now() - p.fecha_creacion)) || ' días • ' || 
-                    to_char(p.fecha_creacion, 'DD Mon, HH:MI a.m.')
+                    to_char(p.fecha_creacion, 'DD Mon, HH12:MI a.m.')
                 WHEN EXTRACT(HOUR FROM (now() - p.fecha_creacion)) > 0 THEN
                     'hace ' || EXTRACT(HOUR FROM (now() - p.fecha_creacion)) || ' horas • ' || 
-                    to_char(p.fecha_creacion, 'DD Mon, HH:MI a.m.')
+                    to_char(p.fecha_creacion, 'DD Mon, HH12:MI a.m.')
                 ELSE
                     'hace ' || EXTRACT(MINUTE FROM (now() - p.fecha_creacion)) || ' minutos • ' || 
-                    to_char(p.fecha_creacion, 'DD Mon, HH:MI a.m.')
+                    to_char(p.fecha_creacion, 'DD Mon, HH12:MI a.m.')
             END AS tiempo_formateado
         FROM 
             pedido p
-        WHERE 
-            p.id_usuario = p_id_usuario
     ),
     productos_pedido AS (
         SELECT 
@@ -1294,33 +1308,33 @@ BEGIN
                 'cantidad', dp.cantidad,
                 'nombre', pr.nombre,
                 'precio_unitario', dp.precio_unitario
-            )) AS productos_json
+            ) ORDER BY dp.id_detalle) AS productos_json
         FROM 
             detalle_pedido dp
+        JOIN 
+            producto pr ON dp.id_producto = pr.id_producto
         LEFT JOIN 
             producto_imagen pi ON dp.id_producto = pi.id_producto AND pi.es_principal = TRUE
-        JOIN
-            producto pr ON dp.id_producto = pr.id_producto
         GROUP BY 
             dp.id_pedido
     )
     SELECT 
         p.numero_pedido,
         p.id_pedido,
-        ue.estado,
-        COALESCE(pp.productos_json, '[]'::json),
+        ue.estado AS estado_actual,
+        COALESCE(pp.productos_json, '[]'::json) AS productos,
         p.total,
         p.total_con_descuento,
         p.fecha_creacion,
-        tt.tiempo_formateado
+        tt.tiempo_formateado AS tiempo_transcurrido
     FROM 
         pedido p
     JOIN 
         ultimo_estado ue ON p.id_pedido = ue.id_pedido AND ue.rn = 1
-    JOIN 
-        tiempo_transcurrido tt ON p.id_pedido = tt.id_pedido
     LEFT JOIN 
         productos_pedido pp ON p.id_pedido = pp.id_pedido
+    LEFT JOIN 
+        tiempo_transcurrido tt ON p.id_pedido = tt.id_pedido
     WHERE 
         p.id_usuario = p_id_usuario
     ORDER BY 
@@ -1328,7 +1342,8 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-SELECT * FROM obtener_pedidos_usuario('a1b2c3d4-e5f6-7890-1234-567890abcdef');
+
+SELECT * FROM obtener_pedidos_usuario('3fa85f64-5717-4562-b3fc-2c963f66afa6');
 
 SELECT 
     id_pedido as IdPedido,
@@ -1339,7 +1354,7 @@ SELECT
     total_con_descuento as TotalConDescuento,
     fecha_creacion as FechaCreacion,
     tiempo_transcurrido as TiempoTranscurrido
-FROM obtener_pedidos_usuario('a1b2c3d4-e5f6-7890-1234-567890abcdef');
+FROM obtener_pedidos_usuario('60cda050-62ce-4786-8f72-16fb1fcc1af0');
 
 drop FUNCTION obtener_detalle_pedido
 --Obtener detalle de pedido
@@ -1398,6 +1413,7 @@ BEGIN
                 json_build_object(
                     'id_producto', dp.id_producto,
                     'nombre', pr.nombre,
+					'descripcion', pr.descripcion,
                     'cantidad', dp.cantidad,
                     'precio_unitario', dp.precio_unitario,
                     'subtotal', (dp.cantidad * dp.precio_unitario)::DECIMAL(10,2),
@@ -1414,7 +1430,16 @@ BEGIN
                         )
                         FROM producto_imagen pi
                         WHERE pi.id_producto = dp.id_producto
-                    )
+                    ),
+					'alergenos', (
+	                    SELECT COALESCE(
+	                        json_agg(a.nombre),
+	                        '[]'::json
+	                    )
+	                    FROM producto_alergeno pa
+	                    JOIN alergeno a ON pa.id_alergeno = a.id_alergeno
+	                    WHERE pa.id_producto = dp.id_producto
+	                )
                 )
             ) AS productos_json
         FROM
@@ -1477,10 +1502,10 @@ SELECT
     metodo_pago as MetodoPago,
     fecha_creacion as FechaCreacion,
     tiempo_transcurrido as TiempoTranscurrido
-FROM obtener_detalle_pedido('de33cf78-768f-490d-b4e5-11a801e1ac1d');
+FROM obtener_detalle_pedido('3b24b1f2-1a24-49dc-9014-ec85e7f671b3');
 
 SELECT obtener_detalle_pedido(
-  '1c74bc8e-eaa6-4fb5-b5aa-81f88a2ee4db'
+  '3b24b1f2-1a24-49dc-9014-ec85e7f671b3'
 );
 
 
@@ -1626,8 +1651,8 @@ BEGIN
     FROM pedido ped
     WHERE ped.id_pedido = p_id_pedido;
 
-    -- Si estado = 'Preparando', calcular ETA basado en estadísticas
-    IF p_estado = 'Preparando' THEN
+    -- Si estado = 'Recibido', calcular ETA basado en estadísticas
+    IF p_estado = 'Recibido' THEN
         -- Obtener datos del día actual
         SELECT 
             AVG(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60),
@@ -1831,15 +1856,16 @@ VALUES (
     now() - INTERVAL '2 hours', 'sistema'
 );
 
-select * from calcular_promedios_preparacion()
-SELECT * from actualizar_estado_pedido('7448a06e-7628-4b0f-bb6a-28de14d85e69', 'Preparando', 'usuario1');
+select promedio_hoy as PromedioHoy,promedio_ayer as PromedioAyer, promedio_semana as PromedioSemana,
+total_pedidos_hoy as TotalPedidoHoy from calcular_promedios_preparacion()
+SELECT * from actualizar_estado_pedido('b55d9b54-b201-4b08-a634-42be49582a9f', 'Preparando', 'usuario1');
 SELECT * from actualizar_estado_pedido('debe36a3-c09d-4886-83fd-72153f18e088', 'Listo', 'usuario1');
 
 
 SELECT * from actualizar_estado_pedido('5dade527-c0fe-4567-816f-ffc927640d1d', 'Preparando', 'usuario1');
 SELECT * from actualizar_estado_pedido('f9fb7151-5d51-43cf-b6c3-77adcc1d346d', 'Preparando', 'usuario1');
 
-SELECT * from actualizar_estado_pedido('4abaf465-f809-4722-8ccb-37b2ca066a79', 'Listo', 'usuario1');
+SELECT * from actualizar_estado_pedido('69e46fdf-a141-4767-a8ed-0e975756fa91', 'Entregado', 'usuario1');
 SELECT * from actualizar_estado_pedido('f9fb7151-5d51-43cf-b6c3-77adcc1d346d', 'Cancelado', 'usuario1');
 
 SELECT * from actualizar_estado_pedido('826ad5d2-32cc-4c00-83a7-e2eff3d8244d', 'Listo', 'usuario1');
@@ -1847,11 +1873,169 @@ SELECT * from actualizar_estado_pedido('826ad5d2-32cc-4c00-83a7-e2eff3d8244d', '
 select * from recalcular_tiempos_estimados()
 
 select * from vista_monitoreo_pedidos
-select * from calcular_tiempo_estimado_restante('7448a06e-7628-4b0f-bb6a-28de14d85e69') 
-select * from calcular_tiempo_estimado_restante('5dade527-c0fe-4567-816f-ffc927640d1d') 
+select * from calcular_tiempo_estimado_restante('a6400fbb-459b-4916-a253-34e75487720b') 
+select  from calcular_tiempo_estimado_restante('5dade527-c0fe-4567-816f-ffc927640d1d') 
 
 
 -- Pedido 1 completado (tiempo total: 30 min)
+
+CREATE OR REPLACE FUNCTION obtener_etas_pedidos()
+RETURNS TABLE (
+    IdPedido UUID,
+    TiempoEstimado INTEGER
+)
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        p.id_pedido,
+        calcular_tiempo_estimado_restante(p.id_pedido) AS TiempoEstimado
+    FROM pedido p
+    JOIN (
+        SELECT DISTINCT ON (id_pedido)
+            id_pedido,
+            estado,
+            fecha_creacion
+        FROM historial_estado_pedido
+        ORDER BY id_pedido, fecha_creacion DESC
+    ) h ON p.id_pedido = h.id_pedido
+    WHERE h.estado in ('Recibido','Preparando');
+END;
+$$;
+
+SELECT idpedido as IdPedido, tiempoEstimado as TiempoEstimado FROM obtener_etas_pedidos();
+
+drop function registrar_producto_con_relaciones
+CREATE OR REPLACE FUNCTION registrar_producto_con_relaciones(
+    p_nombre TEXT,
+    p_descripcion TEXT,
+    p_precio DECIMAL(10,2),
+    p_url_modelo_3d TEXT,
+    p_calorias INTEGER,
+    p_creado_por TEXT,
+    p_categorias JSON,
+    p_ingredientes JSON,
+    p_alergenos JSON,
+    p_preferencias_dieteticas JSON,
+    p_imagenes TEXT, -- era JSON, ahora TEXT
+    p_descuentos TEXT DEFAULT NULL -- era JSON, ahora TEXT
+)
+RETURNS UUID AS $$
+DECLARE
+    v_id_producto UUID := gen_random_uuid();
+    v_id UUID;
+    v_obj JSON;
+BEGIN
+    -- Insertar producto
+    INSERT INTO producto (
+        id_producto, nombre, descripcion, precio, url_modelo_3d,
+        calorias, creado_por
+    )
+    VALUES (
+        v_id_producto, p_nombre, p_descripcion, p_precio, p_url_modelo_3d,
+        p_calorias, p_creado_por
+    );
+
+    -- Insertar categorías
+    FOR v_id IN SELECT json_array_elements_text(p_categorias)
+    LOOP
+        INSERT INTO producto_categoria(id_producto, id_categoria, creado_por)
+        VALUES (v_id_producto, v_id, p_creado_por);
+    END LOOP;
+
+    -- Insertar ingredientes
+    FOR v_id IN SELECT json_array_elements_text(p_ingredientes)
+    LOOP
+        INSERT INTO producto_ingrediente(id_producto, id_ingrediente, creado_por)
+        VALUES (v_id_producto, v_id, p_creado_por);
+    END LOOP;
+
+    -- Insertar alérgenos
+    FOR v_id IN SELECT json_array_elements_text(p_alergenos)
+    LOOP
+        INSERT INTO producto_alergeno(id_producto, id_alergeno, creado_por)
+        VALUES (v_id_producto, v_id, p_creado_por);
+    END LOOP;
+
+    -- Insertar preferencias dietéticas
+    FOR v_id IN SELECT json_array_elements_text(p_preferencias_dieteticas)
+    LOOP
+        INSERT INTO producto_preferencia_dietetica(id_producto, id_preferencia, creado_por)
+        VALUES (v_id_producto, v_id, p_creado_por);
+    END LOOP;
+
+    -- Insertar descuentos
+    FOR v_obj IN SELECT * FROM json_array_elements(p_descuentos::JSON)
+    LOOP
+        INSERT INTO descuento_producto(
+            id_descuento, id_producto, tipo_descuento, valor,
+            fecha_inicio, fecha_fin, es_activo, creado_por
+        )
+        VALUES (
+            gen_random_uuid(), v_id_producto,
+            (v_obj->>'tipo_descuento')::TEXT,
+            (v_obj->>'valor')::DECIMAL,
+            (v_obj->>'fecha_inicio')::TIMESTAMPTZ,
+            (v_obj->>'fecha_fin')::TIMESTAMPTZ,
+            TRUE, p_creado_por
+        );
+    END LOOP;
+
+    -- Insertar imágenes
+    FOR v_obj IN SELECT * FROM json_array_elements(p_imagenes::JSON)
+    LOOP
+        INSERT INTO producto_imagen(
+            id_imagen, id_producto, url_imagen, orden,
+            es_principal, creado_por
+        )
+        VALUES (
+            gen_random_uuid(), v_id_producto,
+            v_obj->>'url',
+            (v_obj->>'orden')::SMALLINT,
+            (v_obj->>'es_principal')::BOOLEAN,
+            p_creado_por
+        );
+    END LOOP;
+
+    RETURN v_id_producto;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+SELECT registrar_producto_con_relaciones(
+    'Pizza Margarita 2', -- @Nombre
+    'Clásica pizza italiana con tomate, mozzarella y albahaca', -- @Descripcion
+    9.99, -- @Precio
+    'https://cdn.ejemplo.com/modelos/pizza.glb', -- @UrlModelo3D
+    850, -- @Calorias
+    'admin', -- @CreadoPor
+    '["e6d795a4-8ca5-4420-a0cf-c8ad58527448"]', -- @Categorias (JSON string)
+    '["2929ac7e-bf38-4223-9911-b3956ddcc5eb", "b08162ce-a957-4b3c-9428-f25acf95e352"]', -- @Ingredientes
+    '["bbebf173-93b8-492f-8f2d-b36a5ec4a6e9"]', -- @Alergenos
+    '["fe5963a3-e9b4-455f-a82d-441a3adf2d8d"]', -- @Preferencias
+    '[
+        {
+            "url": "https://cdn.ejemplo.com/imagenes/pizza1.jpg",
+            "orden": 1,
+            "es_principal": true
+        },
+        {
+            "url": "https://cdn.ejemplo.com/imagenes/pizza2.jpg",
+            "orden": 2,
+            "es_principal": false
+        }
+    ]', -- @Imagenes (JSON array string)
+    '[
+        {
+            "tipo_descuento": "porcentaje",
+            "valor": 10,
+            "fecha_inicio": "2025-06-08T00:00:00Z",
+            "fecha_fin": "2025-06-30T23:59:59Z"
+        }
+    ]' -- @Descuentos (JSON array string)
+);
 
 
  
