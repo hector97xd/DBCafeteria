@@ -1,7 +1,7 @@
 CREATE DATABASE CAFETERIA;
 
 -- Crear tipos personalizados
-CREATE TYPE estado_pedido AS ENUM ('Recibido', 'Preparando', 'Listo', 'Entregado','Cancelado');
+CREATE TYPE estado_pedido AS ENUM ('Pendiente','Recibido', 'Preparando', 'Listo', 'Entregado','Cancelado');
 CREATE TYPE tipo_pago AS ENUM ('Efectivo', 'Tarjeta');
 
 -- Crear tabla categoria
@@ -149,7 +149,8 @@ CREATE TABLE IF NOT EXISTS pedido (
   fecha_recibido TIMESTAMPTZ,
   tiempo_estimado_entrega TIMESTAMPTZ,
   fecha_entrega TIMESTAMPTZ,
-  tiempo_real_preparacion_minutos numeric, 
+  tiempo_real_preparacion_minutos numeric,
+  identificador_enlace_pago UUID UNIQUE,
   fecha_creacion TIMESTAMPTZ DEFAULT now(),
   creado_por TEXT,
   fecha_actualizacion TIMESTAMPTZ null,
@@ -959,6 +960,12 @@ DROP FUNCTION registrar_pedido_completo(
     p_detalles JSON,
     p_cupones JSON
 );
+
+SELECT 'DROP FUNCTION ' || oid::regprocedure || ';' 
+FROM pg_proc 
+WHERE proname = 'registrar_pedido_completo';
+
+
 CREATE OR REPLACE FUNCTION registrar_pedido_completo(
     p_id_usuario UUID,
     p_metodo_pago tipo_pago,
@@ -966,7 +973,8 @@ CREATE OR REPLACE FUNCTION registrar_pedido_completo(
     p_total_con_descuento DECIMAL,
     p_creado_por TEXT,
     p_detalles JSON,
-    p_cupones JSON DEFAULT NULL
+    p_cupones JSON DEFAULT null,
+    p_id_enlace UUID DEFAULT NULL
 )
 RETURNS TABLE (
     IdPedido UUID,
@@ -989,6 +997,7 @@ BEGIN
     INSERT INTO pedido (
         id_pedido,
         id_usuario,
+        identificador_enlace_pago,
         metodo_pago,
         total,
         total_con_descuento,
@@ -997,6 +1006,7 @@ BEGIN
     ) VALUES (
         v_id_pedido,
         p_id_usuario,
+        p_id_enlace,
         p_metodo_pago,
         p_total,
         p_total_con_descuento,
@@ -1078,7 +1088,12 @@ BEGIN
         END LOOP;
     END IF;
 
-	PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Recibido', p_creado_por);
+    -- Establecer estado según método de pago
+    IF p_metodo_pago = 'Efectivo' THEN
+        PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Recibido', p_creado_por);
+    ELSE
+        PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Pendiente', p_creado_por);
+    END IF;
 
     RETURN QUERY SELECT v_id_pedido, 
         'Pedido registrado correctamente con ' || 
@@ -1620,6 +1635,177 @@ CREATE OR REPLACE FUNCTION actualizar_estado_pedido(
     p_id_pedido UUID,
     p_estado estado_pedido,
     p_usuario TEXT
+)
+RETURNS TABLE (
+    id_pedido UUID,
+    estado TEXT,
+    eta_minutos INT,
+    tiempo_restante_minutos INT,
+    tiempo_real_minutos NUMERIC,
+    porcentaje_completado NUMERIC,
+    mensaje TEXT
+)
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_id_pedido UUID;
+    v_tiempo_estimado INTEGER := 15;
+    v_promedio_actual NUMERIC;
+    v_desviacion_estandar NUMERIC;
+    v_total_pedidos_hoy INT;
+    v_promedio_ayer NUMERIC;
+    v_fecha_creacion TIMESTAMPTZ;
+    v_tiempo_real NUMERIC := NULL;
+    v_porcentaje NUMERIC := NULL;
+BEGIN
+    -- Determinar el ID del pedido basándose en el identificador proporcionado
+    -- Primero intentar como UUID (id_pedido)
+    BEGIN
+        v_id_pedido := p_id_pedido::UUID;
+        
+        -- Verificar si existe el pedido con este ID
+        IF NOT EXISTS (SELECT 1 FROM pedido WHERE pedido.id_pedido = v_id_pedido) THEN
+            v_id_pedido := NULL;
+        END IF;
+    EXCEPTION WHEN invalid_text_representation THEN
+        -- Si no es un UUID válido, continuar con la búsqueda por identificador_enlace_pago
+        v_id_pedido := NULL;
+    END;
+    
+    -- Si no se encontró por ID, buscar por identificador_enlace_pago
+    IF v_id_pedido IS NULL THEN
+        BEGIN
+            SELECT pedido.id_pedido INTO v_id_pedido
+            FROM pedido 
+            WHERE pedido.identificador_enlace_pago = p_id_pedido::UUID;
+        EXCEPTION WHEN invalid_text_representation THEN
+            -- Si tampoco es un UUID válido para identificador_enlace_pago
+            v_id_pedido := NULL;
+        END;
+    END IF;
+    
+    -- Si no se encontró el pedido, retornar error
+    IF v_id_pedido IS NULL THEN
+        RETURN QUERY
+        SELECT * FROM (
+            VALUES (
+                NULL::UUID,
+                'Error'::TEXT,
+                0,
+                0,
+                NULL::NUMERIC,
+                NULL::NUMERIC,
+                'Pedido no encontrado con el identificador proporcionado.'::TEXT
+            )
+        ) AS result(
+            id_pedido,
+            estado,
+            eta_minutos,
+            tiempo_restante_minutos,
+            tiempo_real_minutos,
+            porcentaje_completado,
+            mensaje
+        );
+        RETURN;
+    END IF;
+
+    -- Insertar en historial
+    INSERT INTO historial_estado_pedido(id_pedido, estado, creado_por)
+    VALUES (v_id_pedido, p_estado, p_usuario);
+
+    -- Obtener fecha de creación del pedido
+    SELECT ped.fecha_creacion INTO v_fecha_creacion
+    FROM pedido ped
+    WHERE ped.id_pedido = v_id_pedido;
+
+    -- Si estado = 'Recibido', calcular ETA basado en estadísticas
+    IF p_estado = 'Recibido' THEN
+        -- Obtener datos del día actual
+        SELECT
+            AVG(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60),
+            STDDEV(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60),
+            COUNT(*)
+        INTO v_promedio_actual, v_desviacion_estandar, v_total_pedidos_hoy
+        FROM historial_estado_pedido h
+        JOIN pedido ped ON h.id_pedido = ped.id_pedido
+        WHERE h.estado = 'Listo'
+        AND DATE(ped.fecha_creacion) = CURRENT_DATE;
+
+        IF v_total_pedidos_hoy >= 3 AND v_promedio_actual IS NOT NULL THEN
+            v_tiempo_estimado := ROUND(v_promedio_actual + COALESCE(v_desviacion_estandar, 0) * 0.5);
+        ELSE
+            -- Obtener promedio del día anterior si hoy no hay suficientes datos
+            SELECT AVG(EXTRACT(EPOCH FROM (h.fecha_creacion - ped.fecha_creacion)) / 60)
+            INTO v_promedio_ayer
+            FROM historial_estado_pedido h
+            JOIN pedido ped ON h.id_pedido = ped.id_pedido
+            WHERE h.estado = 'Listo'
+            AND DATE(ped.fecha_creacion) = CURRENT_DATE - INTERVAL '1 day';
+
+            IF v_promedio_ayer IS NOT NULL THEN
+                v_tiempo_estimado := ROUND(v_promedio_ayer * 1.2);
+            END IF;
+        END IF;
+
+        -- Guardar ETA en tabla pedido
+        UPDATE pedido
+        SET tiempo_estimado_entrega = now() + (v_tiempo_estimado || ' minutes')::INTERVAL
+        WHERE pedido.id_pedido = v_id_pedido;
+
+    ELSIF p_estado = 'Listo' THEN
+        -- Calcular tiempo real de preparación
+        v_tiempo_real := EXTRACT(EPOCH FROM (now() - v_fecha_creacion)) / 60;
+        UPDATE pedido
+        SET
+            fecha_entrega = now(),
+            tiempo_real_preparacion_minutos = v_tiempo_real
+        WHERE pedido.id_pedido = v_id_pedido;
+    END IF;
+
+    -- Calcular porcentaje completado
+    IF p_estado NOT IN ('Listo', 'Cancelado') THEN
+        SELECT
+            ROUND(
+                (EXTRACT(EPOCH FROM (now() - p.fecha_creacion)) /
+                NULLIF(EXTRACT(EPOCH FROM (p.tiempo_estimado_entrega - p.fecha_creacion)), 0)) * 100,
+                1
+            )
+        INTO v_porcentaje
+        FROM pedido p
+        WHERE p.id_pedido = v_id_pedido;
+    ELSE
+        v_porcentaje := 100;
+    END IF;
+
+    -- Retornar resumen exitoso
+    RETURN QUERY
+    SELECT * FROM (
+        VALUES (
+            v_id_pedido,
+            p_estado::TEXT,
+            v_tiempo_estimado,
+            calcular_tiempo_estimado_restante(v_id_pedido),
+            v_tiempo_real,
+            v_porcentaje,
+            'Estado actualizado correctamente.'::TEXT
+        )
+    ) AS result(
+        id_pedido,
+        estado,
+        eta_minutos,
+        tiempo_restante_minutos,
+        tiempo_real_minutos,
+        porcentaje_completado,
+        mensaje
+    );
+END;
+$$;
+
+
+CREATE OR REPLACE FUNCTION actualizar_estado_pedido(
+    p_id_pedido UUID,
+    p_estado estado_pedido,
+    p_usuario TEXT
 ) 
 RETURNS TABLE (
     id_pedido UUID,
@@ -1906,28 +2092,33 @@ $$;
 
 SELECT idpedido as IdPedido, tiempoEstimado as TiempoEstimado FROM obtener_etas_pedidos();
 
-drop function registrar_producto_con_relaciones
+SELECT 'DROP FUNCTION ' || oid::regprocedure || ';' 
+FROM pg_proc 
+WHERE proname = 'registrar_producto_con_relaciones';
+DROP FUNCTION registrar_producto_con_relaciones(text,text,numeric,text,integer,text,text,text,text,text,text,text);
+
 CREATE OR REPLACE FUNCTION registrar_producto_con_relaciones(
     p_nombre TEXT,
     p_descripcion TEXT,
-    p_precio DECIMAL(10,2),
+    p_precio NUMERIC,
     p_url_modelo_3d TEXT,
     p_calorias INTEGER,
     p_creado_por TEXT,
-    p_categorias JSON,
-    p_ingredientes JSON,
-    p_alergenos JSON,
-    p_preferencias_dieteticas JSON,
-    p_imagenes TEXT, -- era JSON, ahora TEXT
-    p_descuentos TEXT DEFAULT NULL -- era JSON, ahora TEXT
+    p_categorias TEXT,
+    p_ingredientes TEXT,
+    p_alergenos TEXT,
+    p_preferencias_dieteticas TEXT,
+    p_imagenes TEXT,
+    p_descuentos TEXT DEFAULT NULL
 )
 RETURNS UUID AS $$
 DECLARE
     v_id_producto UUID := gen_random_uuid();
     v_id UUID;
     v_obj JSON;
+    v_image JSON;
 BEGIN
-    -- Insertar producto
+    -- Insertar producto principal
     INSERT INTO producto (
         id_producto, nombre, descripcion, precio, url_modelo_3d,
         calorias, creado_por
@@ -1938,65 +2129,79 @@ BEGIN
     );
 
     -- Insertar categorías
-    FOR v_id IN SELECT json_array_elements_text(p_categorias)
-    LOOP
-        INSERT INTO producto_categoria(id_producto, id_categoria, creado_por)
-        VALUES (v_id_producto, v_id, p_creado_por);
-    END LOOP;
+    IF p_categorias IS NOT NULL AND p_categorias <> 'null' AND p_categorias <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_categorias::JSON)
+        LOOP
+            INSERT INTO producto_categoria(id_producto, id_categoria, creado_por)
+            VALUES (v_id_producto, v_id::UUID, p_creado_por);
+        END LOOP;
+    END IF;
 
     -- Insertar ingredientes
-    FOR v_id IN SELECT json_array_elements_text(p_ingredientes)
-    LOOP
-        INSERT INTO producto_ingrediente(id_producto, id_ingrediente, creado_por)
-        VALUES (v_id_producto, v_id, p_creado_por);
-    END LOOP;
+    IF p_ingredientes IS NOT NULL AND p_ingredientes <> 'null' AND p_ingredientes <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_ingredientes::JSON)
+        LOOP
+            INSERT INTO producto_ingrediente(id_producto, id_ingrediente, creado_por)
+            VALUES (v_id_producto, v_id::UUID, p_creado_por);
+        END LOOP;
+    END IF;
 
     -- Insertar alérgenos
-    FOR v_id IN SELECT json_array_elements_text(p_alergenos)
-    LOOP
-        INSERT INTO producto_alergeno(id_producto, id_alergeno, creado_por)
-        VALUES (v_id_producto, v_id, p_creado_por);
-    END LOOP;
+    IF p_alergenos IS NOT NULL AND p_alergenos <> 'null' AND p_alergenos <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_alergenos::JSON)
+        LOOP
+            INSERT INTO producto_alergeno(id_producto, id_alergeno, creado_por)
+            VALUES (v_id_producto, v_id::UUID, p_creado_por);
+        END LOOP;
+    END IF;
 
     -- Insertar preferencias dietéticas
-    FOR v_id IN SELECT json_array_elements_text(p_preferencias_dieteticas)
-    LOOP
-        INSERT INTO producto_preferencia_dietetica(id_producto, id_preferencia, creado_por)
-        VALUES (v_id_producto, v_id, p_creado_por);
-    END LOOP;
+    IF p_preferencias_dieteticas IS NOT NULL AND p_preferencias_dieteticas <> 'null' AND p_preferencias_dieteticas <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_preferencias_dieteticas::JSON)
+        LOOP
+            INSERT INTO producto_preferencia_dietetica(id_producto, id_preferencia, creado_por)
+            VALUES (v_id_producto, v_id::UUID, p_creado_por);
+        END LOOP;
+    END IF;
 
     -- Insertar descuentos
-    FOR v_obj IN SELECT * FROM json_array_elements(p_descuentos::JSON)
-    LOOP
-        INSERT INTO descuento_producto(
-            id_descuento, id_producto, tipo_descuento, valor,
-            fecha_inicio, fecha_fin, es_activo, creado_por
-        )
-        VALUES (
-            gen_random_uuid(), v_id_producto,
-            (v_obj->>'tipo_descuento')::TEXT,
-            (v_obj->>'valor')::DECIMAL,
-            (v_obj->>'fecha_inicio')::TIMESTAMPTZ,
-            (v_obj->>'fecha_fin')::TIMESTAMPTZ,
-            TRUE, p_creado_por
-        );
-    END LOOP;
+    IF p_descuentos IS NOT NULL AND p_descuentos <> 'null' AND p_descuentos <> '' THEN
+        FOR v_obj IN SELECT * FROM json_array_elements(p_descuentos::JSON)
+        LOOP
+            INSERT INTO descuento_producto(
+                id_descuento, id_producto, tipo_descuento, valor,
+                fecha_inicio, fecha_fin, es_activo, creado_por
+            )
+            VALUES (
+                gen_random_uuid(), v_id_producto,
+                (v_obj->>'TipoDescuento')::TEXT,
+                (v_obj->>'Valor')::DECIMAL,
+                (v_obj->>'FechaInicio')::TIMESTAMPTZ,
+                (v_obj->>'FechaFin')::TIMESTAMPTZ,
+                TRUE,
+                p_creado_por
+            );
+        END LOOP;
+    END IF;
 
     -- Insertar imágenes
-    FOR v_obj IN SELECT * FROM json_array_elements(p_imagenes::JSON)
-    LOOP
-        INSERT INTO producto_imagen(
-            id_imagen, id_producto, url_imagen, orden,
-            es_principal, creado_por
-        )
-        VALUES (
-            gen_random_uuid(), v_id_producto,
-            v_obj->>'url',
-            (v_obj->>'orden')::SMALLINT,
-            (v_obj->>'es_principal')::BOOLEAN,
-            p_creado_por
-        );
-    END LOOP;
+    IF p_imagenes IS NOT NULL AND p_imagenes <> 'null' AND p_imagenes <> '' THEN
+        FOR v_image IN SELECT * FROM json_array_elements(p_imagenes::JSON)
+        LOOP
+            INSERT INTO producto_imagen(
+                id_imagen, id_producto, url_imagen, orden,
+                es_principal, creado_por
+            )
+            VALUES (
+                gen_random_uuid(), 
+                v_id_producto,
+                (v_image->>'Url')::TEXT,
+                COALESCE((v_image->>'Orden')::SMALLINT, 1),
+                COALESCE((v_image->>'EsPrincipal')::BOOLEAN, FALSE),
+                p_creado_por
+            );
+        END LOOP;
+    END IF;
 
     RETURN v_id_producto;
 END;
@@ -2005,7 +2210,7 @@ $$ LANGUAGE plpgsql;
 
 
 SELECT registrar_producto_con_relaciones(
-    'Pizza Margarita 2', -- @Nombre
+    'Pizza Margarita 3', -- @Nombre
     'Clásica pizza italiana con tomate, mozzarella y albahaca', -- @Descripcion
     9.99, -- @Precio
     'https://cdn.ejemplo.com/modelos/pizza.glb', -- @UrlModelo3D
@@ -2036,7 +2241,101 @@ SELECT registrar_producto_con_relaciones(
         }
     ]' -- @Descuentos (JSON array string)
 );
+drop FUNCTION validar_y_aplicar_cupon
+CREATE OR REPLACE FUNCTION validar_y_aplicar_cupon(
+    codigo TEXT,
+    total DECIMAL,
+    id_usuario UUID
+)
+RETURNS TABLE (
+    "Estado" BOOLEAN,
+    "Mensaje" TEXT,
+    "idCupon" UUID,
+    "tipoDescuento" TEXT,
+    "descuentoAplicado" DECIMAL,
+    "totalConDescuento" DECIMAL
+)
+AS $$
+DECLARE
+    cupon_reg RECORD;
+    descuento DECIMAL;
+    total_descuento DECIMAL;
+BEGIN
+    -- Buscar cupón por código
+    SELECT *
+    INTO cupon_reg
+    FROM cupon c
+    WHERE c.codigo = validar_y_aplicar_cupon.codigo;
 
+    -- Validación: cupón no encontrado
+    IF NOT FOUND THEN
+        RETURN QUERY SELECT FALSE, 'Cupón no encontrado', NULL::UUID, NULL::TEXT, NULL::DECIMAL, NULL::DECIMAL;
+        RETURN;
+    END IF;
+
+    -- Validación: inactivo
+    IF NOT cupon_reg.es_activo THEN
+        RETURN QUERY SELECT FALSE, 'El cupón no está activo', NULL::UUID, NULL::TEXT, NULL::DECIMAL, NULL::DECIMAL;
+        RETURN;
+    END IF;
+
+    -- Validación: expirado
+    IF cupon_reg.fecha_expiracion < NOW() THEN
+        RETURN QUERY SELECT FALSE, 'El cupón ha expirado', NULL::UUID, NULL::TEXT, NULL::DECIMAL, NULL::DECIMAL;
+        RETURN;
+    END IF;
+
+    -- Validación: límite de uso alcanzado
+    IF cupon_reg.limite_uso IS NOT NULL THEN
+        IF (
+            SELECT COUNT(*) FROM pedido_cupon pc
+            WHERE pc.id_cupon = cupon_reg.id_cupon
+        ) >= cupon_reg.limite_uso THEN
+            RETURN QUERY SELECT FALSE, 'El cupón ha alcanzado su límite de uso', NULL::UUID, NULL::TEXT, NULL::DECIMAL, NULL::DECIMAL;
+            RETURN;
+        END IF;
+    END IF;
+
+    -- Validación: el usuario ya usó el cupón
+    IF EXISTS (
+        SELECT 1
+        FROM pedido_cupon pc
+        INNER JOIN pedido p ON p.id_pedido = pc.id_pedido
+        WHERE pc.id_cupon = cupon_reg.id_cupon
+        AND p.id_usuario = validar_y_aplicar_cupon.id_usuario
+    ) THEN
+        RETURN QUERY SELECT FALSE, 'El usuario ya ha usado este cupón', NULL::UUID, NULL::TEXT, NULL::DECIMAL, NULL::DECIMAL;
+        RETURN;
+    END IF;
+
+    -- Aplicar descuento
+    IF cupon_reg.tipo_descuento = 'fijo' THEN
+        descuento := cupon_reg.descuento;
+        total_descuento := GREATEST(0, total - descuento);
+        RETURN QUERY SELECT TRUE, 'Cupón válido', cupon_reg.id_cupon, cupon_reg.tipo_descuento, descuento, total_descuento;
+    ELSIF cupon_reg.tipo_descuento = 'porcentaje' THEN
+        descuento := total * (cupon_reg.descuento / 100);
+        total_descuento := GREATEST(0, total - descuento);
+        RETURN QUERY SELECT TRUE, 'Cupón válido', cupon_reg.id_cupon, cupon_reg.tipo_descuento, descuento, total_descuento;
+    ELSE
+        RETURN QUERY SELECT FALSE, 'Tipo de descuento no válido', NULL::UUID, NULL::TEXT, NULL::DECIMAL, NULL::DECIMAL;
+        RETURN;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+
+
+
+
+
+
+
+SELECT * FROM validar_y_aplicar_cupon(
+  'PROMO2025',                          -- código del cupón
+  13.19,                           -- total de la compra
+  '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7' -- id del usuario
+);
 
  
                         
