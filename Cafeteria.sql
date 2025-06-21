@@ -2337,5 +2337,195 @@ SELECT * FROM validar_y_aplicar_cupon(
   '1d2fda2e-2a9d-4e0a-a932-4a51748a3fd7' -- id del usuario
 );
 
+CREATE OR REPLACE FUNCTION modificar_producto_con_relaciones(
+    p_id_producto UUID,
+    p_nombre TEXT,
+    p_descripcion TEXT,
+    p_precio NUMERIC,
+    p_url_modelo_3d TEXT,
+    p_calorias INTEGER,
+    p_actualizado_por TEXT,
+    p_categorias TEXT,
+    p_ingredientes TEXT,
+    p_alergenos TEXT,
+    p_preferencias_dieteticas TEXT,
+    p_imagenes TEXT,
+    p_descuentos TEXT DEFAULT NULL
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_id UUID;
+    v_obj JSON;
+    v_image JSON;
+BEGIN
+    UPDATE producto
+    SET nombre = p_nombre,
+        descripcion = p_descripcion,
+        precio = p_precio,
+        url_modelo_3d = p_url_modelo_3d,
+        calorias = p_calorias,
+        actualizado_por = p_actualizado_por,
+        fecha_actualizacion = now()
+    WHERE id_producto = p_id_producto;
+
+    -- Limpiar relaciones existentes
+    DELETE FROM producto_categoria WHERE id_producto = p_id_producto;
+    DELETE FROM producto_ingrediente WHERE id_producto = p_id_producto;
+    DELETE FROM producto_alergeno WHERE id_producto = p_id_producto;
+    DELETE FROM producto_preferencia_dietetica WHERE id_producto = p_id_producto;
+    DELETE FROM descuento_producto WHERE id_producto = p_id_producto;
+    DELETE FROM producto_imagen WHERE id_producto = p_id_producto;
+
+    -- Insertar categorías
+    IF p_categorias IS NOT NULL AND p_categorias <> 'null' AND p_categorias <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_categorias::JSON)
+        LOOP
+            INSERT INTO producto_categoria(id_producto, id_categoria, creado_por)
+            VALUES (p_id_producto, v_id::UUID, p_actualizado_por);
+        END LOOP;
+    END IF;
+
+    -- Insertar ingredientes
+    IF p_ingredientes IS NOT NULL AND p_ingredientes <> 'null' AND p_ingredientes <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_ingredientes::JSON)
+        LOOP
+            INSERT INTO producto_ingrediente(id_producto, id_ingrediente, creado_por)
+            VALUES (p_id_producto, v_id::UUID, p_actualizado_por);
+        END LOOP;
+    END IF;
+
+    -- Insertar alérgenos
+    IF p_alergenos IS NOT NULL AND p_alergenos <> 'null' AND p_alergenos <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_alergenos::JSON)
+        LOOP
+            INSERT INTO producto_alergeno(id_producto, id_alergeno, creado_por)
+            VALUES (p_id_producto, v_id::UUID, p_actualizado_por);
+        END LOOP;
+    END IF;
+
+    -- Insertar preferencias dietéticas
+    IF p_preferencias_dieteticas IS NOT NULL AND p_preferencias_dieteticas <> 'null' AND p_preferencias_dieteticas <> '' THEN
+        FOR v_id IN SELECT json_array_elements_text(p_preferencias_dieteticas::JSON)
+        LOOP
+            INSERT INTO producto_preferencia_dietetica(id_producto, id_preferencia, creado_por)
+            VALUES (p_id_producto, v_id::UUID, p_actualizado_por);
+        END LOOP;
+    END IF;
+
+    -- Insertar descuentos
+    IF p_descuentos IS NOT NULL AND p_descuentos <> 'null' AND p_descuentos <> '' THEN
+        FOR v_obj IN SELECT * FROM json_array_elements(p_descuentos::JSON)
+        LOOP
+            INSERT INTO descuento_producto(
+                id_descuento, id_producto, tipo_descuento, valor,
+                fecha_inicio, fecha_fin, es_activo, creado_por
+            )
+            VALUES (
+                gen_random_uuid(), p_id_producto,
+                (v_obj->>'TipoDescuento')::TEXT,
+                (v_obj->>'Valor')::DECIMAL,
+                (v_obj->>'FechaInicio')::TIMESTAMPTZ,
+                (v_obj->>'FechaFin')::TIMESTAMPTZ,
+                TRUE,
+                p_actualizado_por
+            );
+        END LOOP;
+    END IF;
+
+    -- Insertar imágenes
+    IF p_imagenes IS NOT NULL AND p_imagenes <> 'null' AND p_imagenes <> '' THEN
+        FOR v_image IN SELECT * FROM json_array_elements(p_imagenes::JSON)
+        LOOP
+            INSERT INTO producto_imagen(
+                id_imagen, id_producto, url_imagen, orden,
+                es_principal, creado_por
+            )
+            VALUES (
+                gen_random_uuid(),
+                p_id_producto,
+                (v_image->>'Url')::TEXT,
+                COALESCE((v_image->>'Orden')::SMALLINT, 1),
+                COALESCE((v_image->>'EsPrincipal')::BOOLEAN, FALSE),
+                p_actualizado_por
+            );
+        END LOOP;
+    END IF;
+
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT nombre,pi2.* FROM public.producto_imagen AS pi2
+inner join producto p on pi2.id_producto = p.id_producto
+
+
+-- Update statements for producto_imagen table
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pollo%20en%20salsa%20cilantro.jpg' WHERE id_imagen = '8dded38a-f8fe-4fca-837c-a45960bea143';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pollo%20en%20salsa%20cilantro.jpg' WHERE id_imagen = '1383a9f2-2c78-4d42-8eb3-dbc02a53d21a';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20frijoles%20con%20carne%20de%20cerdo.jpg' WHERE id_imagen = '298f198c-3fa7-4619-bbd9-b42015c5dcf7';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20frijoles%20con%20carne%20de%20cerdo.jpg' WHERE id_imagen = '7db38c67-49e7-48b6-9ec1-280c8289919f';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pupusas.jpg' WHERE id_imagen = '148d8385-e197-477c-93bd-08337aec85c2';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pupusas.jpg' WHERE id_imagen = '38b2832e-9ced-4435-ad73-503661f3952b';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pollo%20en%20salsa%20cilantro.jpg' WHERE id_imagen = '53330326-47b0-446a-8a8a-9b0e7f39d5fe';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pollo%20en%20salsa%20cilantro.jpg' WHERE id_imagen = '2f49964a-913a-441b-9274-b7aacc4f4eac';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Costillas%20a%20la%20barbacoa%20jugosas.jpg' WHERE id_imagen = '1eee1c15-76d1-4723-9e0f-6424388895ed';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Costillas%20a%20la%20barbacoa%20jugosas.jpg' WHERE id_imagen = '09487467-549e-4a69-baa2-4e06b39cbfb0';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pasta%20corta%20en%20salsa%20blanco.jpg' WHERE id_imagen = '323bfcf6-5be0-4cde-a75f-1570afae0b5c';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pasta%20corta%20en%20salsa%20blanco.jpg' WHERE id_imagen = '1eeaa8a5-e2cd-42ee-8837-0f5ee45ae085';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Chilaquilas.jpg' WHERE id_imagen = 'd3a9b6d0-58f5-4ed9-b7a1-16120cc14291';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Chilaquilas.jpg' WHERE id_imagen = '0bb60510-3de0-4efe-9bb6-1081d6d62269';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20frijoles%20con%20carne%20de%20cerdo.jpg' WHERE id_imagen = 'ccda22ec-8ca7-490a-85a3-c1a0c6575777';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20frijoles%20con%20carne%20de%20cerdo.jpg' WHERE id_imagen = '7bdc4b49-133d-4116-b2e2-7b31025bdee4';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Atol%20de%20pin%CC%83a.jpg' WHERE id_imagen = 'd1587111-f535-40b9-9d02-3085840e11b6';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Atol%20de%20pin%CC%83a.jpg' WHERE id_imagen = 'fb84db78-987b-415e-a6a3-e5911a1f4117';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pupusas.jpg' WHERE id_imagen = '0644d03e-4ed1-4c11-80d5-d8281bdd5ae8';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pupusas.jpg' WHERE id_imagen = '3599194f-e4e5-4f3c-87ab-478406369860';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pastelitos%20de%20res.jpg' WHERE id_imagen = '1626b7a0-2999-4a7d-a4ec-cfa1c5f6621b';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Pastelitos%20de%20res.jpg' WHERE id_imagen = 'f3aa510d-5e28-4968-8fcb-4beb9eb6400f';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Yuca%20salcochada.jpg' WHERE id_imagen = '94a3e1d5-f686-4b06-9834-f760a5ea643f';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Yuca%20salcochada.jpg' WHERE id_imagen = '6aac14d2-487e-4318-b7c5-7ec81e3baa4e';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Arroz%20en%20leche.jpg' WHERE id_imagen = 'e9199f84-efb0-44df-a60a-aaec7dafb19f';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Arroz%20en%20leche.jpg' WHERE id_imagen = 'ecb02670-f141-434f-876a-5e91d270a59b';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Canoas.jpg' WHERE id_imagen = 'f0471c11-a499-449c-b9b8-3a25f1ad91a2';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Canoas.jpg' WHERE id_imagen = '79aa5420-5b87-49c1-a508-e129f8b87244';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Fajitas%20de%20cerdo.jpg' WHERE id_imagen = 'd3aa5e16-e422-4ad9-8488-54147062a182';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Fajitas%20de%20cerdo.jpg' WHERE id_imagen = '429cd1c8-1051-45ca-b2a0-0a259de842c8';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Lomo%20de%20cerdo%20en%20Barbacoa.jpg' WHERE id_imagen = 'e70a5cdc-ea92-464d-ba89-59154b1bc061';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Lomo%20de%20cerdo%20en%20Barbacoa.jpg' WHERE id_imagen = 'fe963d4e-6131-47e9-9c74-20652c8f974a';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Alitas%20Chipotle.jpg' WHERE id_imagen = '60ffd13c-8737-4131-9ee6-c3c149f831dd';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Alitas%20Chipotle.jpg' WHERE id_imagen = 'd59c90d6-c2c8-4d37-824e-dfde774cfb91';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Papas%20rellenas.jpg' WHERE id_imagen = 'faa2378f-a7f8-410c-bf5d-b1e1c18c90bb';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Papas%20rellenas.jpg' WHERE id_imagen = 'b6c24e77-930a-4435-bd3b-d255b406d0d8';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20pollo.jpg' WHERE id_imagen = 'a22e94b4-7a63-4248-a800-f123f7185148';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20pollo.jpg' WHERE id_imagen = '03e6d1cd-57fa-4f59-875f-285e04b35dd1';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Filete%20de%20res%20en%20salsa%20de%20hongos.jpg' WHERE id_imagen = '7b721657-8aaa-452c-8566-0796c5a0c21a';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Filete%20de%20res%20en%20salsa%20de%20hongos.jpg' WHERE id_imagen = '9fe204eb-30dc-484e-91d2-4459297373bd';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Crema%20de%20tomate.jpg' WHERE id_imagen = '14e3af76-84af-42f9-8ed7-498f4ebd48b5';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Crema%20de%20tomate.jpg' WHERE id_imagen = '079bda86-2fcc-4005-800a-b82121ab5521';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Lasan%CC%83a%20de%20Res.png' WHERE id_imagen = '4c66a618-5309-4565-a7d9-65369e1d74dc';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Lasan%CC%83a%20de%20Res.png' WHERE id_imagen = '83b86329-e094-4fbb-a4dd-8ba020cf98c4';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Canoas.jpg' WHERE id_imagen = '8e5d758e-666e-486d-b8de-b36df424d0b1';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Canoas.jpg' WHERE id_imagen = '8e52a19f-ecb8-4e02-8482-20a8d0c9a0d8';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/porcion-de-lasana-de-pollo.jpg' WHERE id_imagen = 'dc28d772-62ea-425a-b543-3870d9f3df59';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/porcion-de-lasana-de-pollo.jpg' WHERE id_imagen = '7d7591c1-f4ba-44a5-a516-f09b933ddd20';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Alitas%20Chipotle.jpg' WHERE id_imagen = '314fde28-b8fc-4813-8803-8525b190283e';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Alitas%20Chipotle.jpg' WHERE id_imagen = '1abbfdf2-dcc1-484b-ba67-c205b4e7e450';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Torta%20mexicana%20de%20pollo.jpg' WHERE id_imagen = 'c6467aee-8e5d-4174-a557-49aec46ece91';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Torta%20mexicana%20de%20pollo.jpg' WHERE id_imagen = '3ff0c750-67d0-446f-bbd3-3260425497db';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20pollo.jpg' WHERE id_imagen = 'ec5ec50f-d93f-4127-bee6-fe3bffdd4e1d';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Sopa%20de%20pollo.jpg' WHERE id_imagen = '13625205-2c9c-447d-b487-b7989a134475';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Nuegados%20de%20yuca.jpg' WHERE id_imagen = '0f39f4e4-a405-45a5-9deb-43d52247bbb6';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Nuegados%20de%20yuca.jpg' WHERE id_imagen = '414a6f53-09c2-4e75-9ec4-d058ddcf87de';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Arroz%20en%20leche.jpg' WHERE id_imagen = '501056ce-5d2e-4c13-9384-a7e00f64cd31';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Arroz%20en%20leche.jpg' WHERE id_imagen = 'fd1020d2-eb8e-4ccf-b330-bad161e12711';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Canoas.jpg' WHERE id_imagen = 'c6faba8b-9a9a-4d36-b54c-ff0967949172';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Canoas.jpg' WHERE id_imagen = 'dcb4c6ec-2d48-4b9c-8fda-9f8978b46705';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Arroz%20en%20leche.jpg' WHERE id_imagen = 'c1f546c8-50b8-4f3c-bb94-e26ecf34ba06';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/Arroz%20en%20leche.jpg' WHERE id_imagen = '60845247-8d88-4039-8108-ecbc67cc3e6f';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/porcion-de-lasana-de-pollo.jpg' WHERE id_imagen = '1f98a879-138a-4b27-8a9f-dedf7783eae5';
+UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.windows.net/productos-default/porcion-de-lasana-de-pollo.jpg' WHERE id_imagen = 'ee378386-394b-444c-97d0-5c0a655d177d';
+
+
+
  
                         
