@@ -1,8 +1,9 @@
 CREATE DATABASE CAFETERIA;
 
 -- Crear tipos personalizados
-CREATE TYPE estado_pedido AS ENUM ('Pendiente','Recibido', 'Preparando', 'Listo', 'Entregado','Cancelado');
-CREATE TYPE tipo_pago AS ENUM ('Efectivo', 'Tarjeta');
+CREATE TYPE estado_pedido AS ENUM ('Pendiente','Recibido', 'Preparando', 'Listo', 'Entregado','Cancelado','Programado');
+CREATE TYPE tipo_pago AS ENUM ('Efectivo', 'Tarjeta','Saldo');
+
 
 -- Crear tabla categoria
 CREATE TABLE IF NOT EXISTS categoria (
@@ -143,6 +144,8 @@ CREATE TABLE IF NOT EXISTS pedido (
   id_pedido UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   id_usuario UUID NOT NULL,
   metodo_pago tipo_pago NOT NULL,
+  fecha_programada TIMESTAMPTZ NULL,
+  es_pedido_programado BOOLEAN DEFAULT false,
   numero_pedido BIGINT NOT NULL,,
   total DECIMAL(10,2) NOT NULL CHECK (total >= 0),
   total_con_descuento DECIMAL(10,2) CHECK (total_con_descuento >= 0),
@@ -151,11 +154,34 @@ CREATE TABLE IF NOT EXISTS pedido (
   fecha_entrega TIMESTAMPTZ,
   tiempo_real_preparacion_minutos numeric,
   identificador_enlace_pago UUID UNIQUE,
-  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  id_evento UUID REFERENCES tipo_evento(id_evento),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),	
   creado_por TEXT,
   fecha_actualizacion TIMESTAMPTZ null,
   actualizado_por TEXT
 );
+
+CREATE TABLE IF NOT EXISTS saldo_usuario (
+  id_saldo UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_usuario UUID NOT NULL UNIQUE,
+  saldo DECIMAL(10,2) NOT NULL DEFAULT 0 CHECK (saldo >= 0),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ,
+  actualizado_por TEXT
+);
+
+-- Tabla para registrar transacciones de saldo
+CREATE TABLE IF NOT EXISTS transaccion_saldo (
+  id_transaccion UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_usuario UUID NOT NULL,
+  tipo TEXT NOT NULL CHECK (tipo IN ('Recarga', 'Compra', 'Devolucion')),
+  monto DECIMAL(10,2) NOT NULL,
+  id_pedido UUID REFERENCES pedido(id_pedido) ON DELETE SET NULL,
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT
+);
+
 
 -- Crear tabla detalle_pedido
 CREATE TABLE IF NOT EXISTS detalle_pedido (
@@ -175,7 +201,7 @@ CREATE TABLE IF NOT EXISTS cupon (
   id_cupon UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   codigo TEXT UNIQUE NOT NULL,
   descuento DECIMAL(10,2) NOT NULL CHECK (descuento >= 0),
-  tipo_descuento TEXT CHECK (tipo_descuento IN ('fijo', 'porcentaje')) NOT NULL,
+  tipo_descuento TEXT CHECK (tipo_descuento IN ('	', 'porcentaje')) NOT NULL,
   fecha_expiracion TIMESTAMPTZ NOT NULL,
   limite_uso INTEGER CHECK (limite_uso >= 0),
   es_activo BOOLEAN DEFAULT TRUE,
@@ -204,6 +230,26 @@ CREATE TABLE IF NOT EXISTS historial_estado_pedido (
   fecha_creacion TIMESTAMPTZ DEFAULT now(),
   creado_por TEXT
 );
+
+CREATE TABLE IF NOT EXISTS tipo_evento (
+    id_evento UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    nombre TEXT NOT NULL unique,
+    fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  	creado_por TEXT,
+  	fecha_actualizacion TIMESTAMPTZ null,
+  	actualizado_por TEXT
+);
+CREATE TABLE IF NOT EXISTS stock_producto_dia (
+  id_stock UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  id_producto UUID REFERENCES producto(id_producto) ON DELETE CASCADE,
+  dia_semana varchar(100),
+  stock_disponible INTEGER NOT NULL CHECK (stock_disponible >= 0),
+  stock_reservado INTEGER DEFAULT 0 CHECK (stock_reservado >= 0),
+  fecha_creacion TIMESTAMPTZ DEFAULT now(),
+  creado_por TEXT,
+  fecha_actualizacion TIMESTAMPTZ,
+  actualizado_por TEXT);
+
 
 
 -- Función para actualizar fecha_actualizacion
@@ -273,8 +319,32 @@ CREATE INDEX idx_producto_ingrediente_producto ON producto_ingrediente(id_produc
 CREATE INDEX idx_producto_alergeno_producto ON producto_alergeno(id_producto);
 CREATE INDEX idx_producto_preferencia_producto ON producto_preferencia_dietetica(id_producto);
 CREATE INDEX idx_producto_imagen_producto ON producto_imagen(id_producto);
+-- CRÍTICO: Para consultas de ventas por período (día, semana, mes)
+CREATE INDEX idx_pedido_fecha_creacion ON pedido(fecha_creacion DESC) 
+INCLUDE (total, total_con_descuento, id_usuario);
+
+-- CRÍTICO: Para estado de pedidos por período
+CREATE INDEX idx_historial_estado_compuesto ON historial_estado_pedido(estado, fecha_creacion DESC) 
+INCLUDE (id_pedido);
+
+-- Para obtener el último estado de cada pedido eficientemente
+CREATE INDEX idx_historial_pedido_fecha ON historial_estado_pedido(id_pedido, fecha_creacion DESC);
+
+-- Para productos más vendidos
+CREATE INDEX idx_detalle_pedido_producto_cantidad ON detalle_pedido(id_producto) 
+INCLUDE (cantidad, precio_unitario);
+
 
 -- INSERTS
+INSERT INTO tipo_evento (nombre, creado_por)
+VALUES
+  ('Evento académico', 'admin'),
+  ('Taller de capacitación', 'admin'),
+  ('Jornada de socialización de proyectos', 'admin'),
+  ('Congreso de investigación', 'admin'),
+  ('Reunión de docentes', 'admin');
+
+
 -- Insertar alergenos (ajustado con campos de auditoría completos)
 INSERT INTO alergeno (nombre, creado_por, fecha_creacion, fecha_actualizacion, actualizado_por) 
 VALUES 
@@ -965,6 +1035,185 @@ SELECT 'DROP FUNCTION ' || oid::regprocedure || ';'
 FROM pg_proc 
 WHERE proname = 'registrar_pedido_completo';
 
+DROP FUNCTION registrar_pedido_completo(uuid,tipo_pago,numeric,numeric,text,json,json,uuid,boolean,timestamp with time zone);
+
+CREATE OR REPLACE FUNCTION registrar_pedido_completo(
+    p_id_usuario UUID,
+    p_metodo_pago tipo_pago,
+    p_total DECIMAL,
+    p_total_con_descuento DECIMAL,
+    p_creado_por TEXT,
+    p_detalles JSON,
+    p_cupones JSON DEFAULT null,
+    p_id_enlace UUID DEFAULT NULL,
+    p_es_pedido_programado BOOLEAN DEFAULT FALSE,
+    p_fecha_programada TIMESTAMPTZ DEFAULT null,
+    p_id_evento UUID DEFAULT NULL
+)
+RETURNS TABLE (
+    IdPedido UUID,
+    Mensaje TEXT,
+    Exito BOOLEAN
+) AS $$
+DECLARE
+    v_id_pedido UUID := gen_random_uuid();
+    v_detalle RECORD;
+    v_cupon RECORD;
+    v_error_context TEXT;
+BEGIN
+    -- Validación inicial
+    IF p_total <= 0 THEN
+        RETURN QUERY SELECT NULL::UUID, 'El total del pedido debe ser mayor que cero', FALSE;
+        RETURN;
+    END IF;
+
+    IF p_es_pedido_programado AND p_fecha_programada IS NULL THEN
+        RETURN QUERY SELECT NULL::UUID, 'Debe especificar una fecha programada para el pedido', FALSE;
+        RETURN;
+    END IF;
+	-- Validacion de Saldo
+	IF p_metodo_pago = 'Saldo' THEN
+	  -- Descontar saldo
+	  UPDATE saldo_usuario
+	  SET saldo = saldo - p_total_con_descuento,
+	      fecha_actualizacion = NOW(),
+	      actualizado_por = p_creado_por
+	  WHERE id_usuario = p_id_usuario;
+	
+	  -- Registrar transacción de saldo
+	  INSERT INTO transaccion_saldo (
+	    id_usuario, tipo, monto, id_pedido, creado_por
+	  ) VALUES (
+	    p_id_usuario, 'Compra', p_total_con_descuento, v_id_pedido, p_creado_por
+	  );
+	END IF;
+
+    -- Insertar pedido
+    INSERT INTO pedido (
+        id_pedido,
+        id_usuario,
+        identificador_enlace_pago,
+        metodo_pago,
+        total,
+        total_con_descuento,
+        creado_por,
+        fecha_creacion,
+        es_pedido_programado,
+        fecha_programada,
+		id_evento
+    ) VALUES (
+        v_id_pedido,
+        p_id_usuario,
+        p_id_enlace,
+        p_metodo_pago,
+        p_total,
+        p_total_con_descuento,
+        p_creado_por,
+        NOW(),
+        p_es_pedido_programado,
+        p_fecha_programada,
+		p_id_evento 
+    );
+
+    -- Insertar detalles del pedido
+    FOR v_detalle IN SELECT * FROM json_to_recordset(p_detalles) AS (
+        "IdProducto" UUID,
+        "Cantidad" INTEGER,
+        "PrecioUnitario" DECIMAL
+    )
+    LOOP
+        IF v_detalle."Cantidad" <= 0 THEN
+            RETURN QUERY SELECT NULL::UUID, 'La cantidad debe ser mayor que cero', FALSE;
+            RETURN;
+        END IF;
+
+        IF v_detalle."PrecioUnitario" < 0 THEN
+            RETURN QUERY SELECT NULL::UUID, 'El precio unitario no puede ser negativo', FALSE;
+            RETURN;
+        END IF;
+
+        INSERT INTO detalle_pedido (
+            id_pedido,
+            id_producto,
+            cantidad,
+            precio_unitario,
+            creado_por,
+            fecha_creacion,
+            actualizado_por,
+            fecha_actualizacion
+        ) VALUES (
+            v_id_pedido,
+            v_detalle."IdProducto",
+            v_detalle."Cantidad",
+            v_detalle."PrecioUnitario",
+            p_creado_por,
+            NOW(),
+            p_creado_por,
+            NOW()
+        );
+    END LOOP;
+
+    -- Insertar cupones si hay
+    IF p_cupones IS NOT NULL THEN
+        FOR v_cupon IN SELECT * FROM json_to_recordset(p_cupones) AS (
+            "IdCupon" UUID,
+            "TipoDescuento" TEXT,
+            "DescuentoAplicado" DECIMAL
+        )
+        LOOP
+            IF v_cupon."DescuentoAplicado" < 0 THEN
+                RETURN QUERY SELECT NULL::UUID, 'El descuento aplicado no puede ser negativo', FALSE;
+                RETURN;
+            END IF;
+
+            IF v_cupon."TipoDescuento" NOT IN ('fijo', 'porcentaje') THEN
+                RETURN QUERY SELECT NULL::UUID, 'Tipo de descuento no válido. Debe ser "fijo" o "porcentaje"', FALSE;
+                RETURN;
+            END IF;
+
+            INSERT INTO pedido_cupon (
+                id_pedido,
+                id_cupon,
+                tipo_descuento,
+                descuento_aplicado,
+                creado_por,
+                fecha_creacion
+            ) VALUES (
+                v_id_pedido,
+                v_cupon."IdCupon",
+                v_cupon."TipoDescuento",
+                v_cupon."DescuentoAplicado",
+                p_creado_por,
+                NOW()
+            );
+        END LOOP;
+    END IF;
+
+    -- Estado inicial del pedido
+    IF p_es_pedido_programado THEN
+        PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Programado', p_creado_por);
+    ELSIF p_metodo_pago = 'Efectivo' THEN
+        PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Recibido', p_creado_por);
+    ELSE
+        PERFORM * FROM actualizar_estado_pedido(v_id_pedido, 'Pendiente', p_creado_por);
+    END IF;
+
+    RETURN QUERY SELECT v_id_pedido, 
+        'Pedido ' || CASE WHEN p_es_pedido_programado THEN 'programado' ELSE 'normal' END ||
+        ' registrado correctamente con ' || 
+        json_array_length(p_detalles) || ' detalles y ' || 
+        COALESCE(json_array_length(p_cupones), 0) || ' cupones',
+        TRUE;
+
+EXCEPTION WHEN OTHERS THEN
+    GET STACKED DIAGNOSTICS v_error_context = PG_EXCEPTION_CONTEXT;
+    RETURN QUERY SELECT NULL::UUID,
+        'Error al registrar el pedido: ' || SQLERRM || 
+        ' - Contexto: ' || v_error_context,
+        FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
 
 CREATE OR REPLACE FUNCTION registrar_pedido_completo(
     p_id_usuario UUID,
@@ -1274,7 +1523,6 @@ SELECT actualizar_preferencias_dieteticas(
 );
 
  drop FUNCTION obtener_pedidos_usuario
-
 CREATE OR REPLACE FUNCTION obtener_pedidos_usuario(
     p_id_usuario UUID
 )
@@ -1288,11 +1536,13 @@ RETURNS TABLE (
     fecha_creacion TIMESTAMPTZ,
     tiempo_transcurrido TEXT
 ) AS $$
+DECLARE
+    zona_horaria TEXT := 'America/El_Salvador';
 BEGIN
     RETURN QUERY
     WITH ultimo_estado AS (
         SELECT 
-            he.id_pedido, 
+            he.id_pedido,
             he.estado,
             ROW_NUMBER() OVER (PARTITION BY he.id_pedido ORDER BY he.fecha_creacion DESC) AS rn
         FROM 
@@ -1301,16 +1551,61 @@ BEGIN
     tiempo_transcurrido AS (
         SELECT 
             p.id_pedido,
-            CASE 
-                WHEN EXTRACT(DAY FROM (now() - p.fecha_creacion)) > 0 THEN
-                    'hace ' || EXTRACT(DAY FROM (now() - p.fecha_creacion)) || ' días • ' || 
-                    to_char(p.fecha_creacion, 'DD Mon, HH12:MI a.m.')
-                WHEN EXTRACT(HOUR FROM (now() - p.fecha_creacion)) > 0 THEN
-                    'hace ' || EXTRACT(HOUR FROM (now() - p.fecha_creacion)) || ' horas • ' || 
-                    to_char(p.fecha_creacion, 'DD Mon, HH12:MI a.m.')
+            CASE
+                -- Si han pasado más de 30 días, mostrar la fecha completa
+                WHEN EXTRACT(DAY FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) >= 30 THEN
+                    TO_CHAR(p.fecha_creacion AT TIME ZONE zona_horaria, 'DD Mon YYYY, HH12:MI ') ||
+                    CASE 
+                        WHEN EXTRACT(HOUR FROM p.fecha_creacion AT TIME ZONE zona_horaria) < 12 THEN 'a.m.'
+                        ELSE 'p.m.'
+                    END
+                -- Si han pasado días
+                WHEN EXTRACT(DAY FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) > 0 THEN
+                    'hace ' || 
+                    FLOOR(EXTRACT(EPOCH FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) / 86400)::TEXT || 
+                    CASE 
+                        WHEN FLOOR(EXTRACT(EPOCH FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) / 86400) = 1 THEN ' día'
+                        ELSE ' días'
+                    END || ' • ' ||
+                    TO_CHAR(p.fecha_creacion AT TIME ZONE zona_horaria, 'DD Mon, HH12:MI ') ||
+                    CASE 
+                        WHEN EXTRACT(HOUR FROM p.fecha_creacion AT TIME ZONE zona_horaria) < 12 THEN 'a.m.'
+                        ELSE 'p.m.'
+                    END
+                -- Si han pasado horas
+                WHEN EXTRACT(HOUR FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) > 0 THEN
+                    'hace ' || 
+                    FLOOR(EXTRACT(EPOCH FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) / 3600)::TEXT || 
+                    CASE 
+                        WHEN FLOOR(EXTRACT(EPOCH FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) / 3600) = 1 THEN ' hora'
+                        ELSE ' horas'
+                    END || ' • ' ||
+                    TO_CHAR(p.fecha_creacion AT TIME ZONE zona_horaria, 'DD Mon, HH12:MI ') ||
+                    CASE 
+                        WHEN EXTRACT(HOUR FROM p.fecha_creacion AT TIME ZONE zona_horaria) < 12 THEN 'a.m.'
+                        ELSE 'p.m.'
+                    END
+                -- Si han pasado minutos
+                WHEN EXTRACT(MINUTE FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) > 0 THEN
+                    'hace ' || 
+                    FLOOR(EXTRACT(EPOCH FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) / 60)::TEXT || 
+                    CASE 
+                        WHEN FLOOR(EXTRACT(EPOCH FROM (NOW() AT TIME ZONE zona_horaria - p.fecha_creacion AT TIME ZONE zona_horaria)) / 60) = 1 THEN ' minuto'
+                        ELSE ' minutos'
+                    END || ' • ' ||
+                    TO_CHAR(p.fecha_creacion AT TIME ZONE zona_horaria, 'DD Mon, HH12:MI ') ||
+                    CASE 
+                        WHEN EXTRACT(HOUR FROM p.fecha_creacion AT TIME ZONE zona_horaria) < 12 THEN 'a.m.'
+                        ELSE 'p.m.'
+                    END
+                -- Si es menos de un minuto
                 ELSE
-                    'hace ' || EXTRACT(MINUTE FROM (now() - p.fecha_creacion)) || ' minutos • ' || 
-                    to_char(p.fecha_creacion, 'DD Mon, HH12:MI a.m.')
+                    'hace un momento • ' ||
+                    TO_CHAR(p.fecha_creacion AT TIME ZONE zona_horaria, 'DD Mon, HH12:MI ') ||
+                    CASE 
+                        WHEN EXTRACT(HOUR FROM p.fecha_creacion AT TIME ZONE zona_horaria) < 12 THEN 'a.m.'
+                        ELSE 'p.m.'
+                    END
             END AS tiempo_formateado
         FROM 
             pedido p
@@ -1358,7 +1653,8 @@ END;
 $$ LANGUAGE plpgsql;
 
 
-SELECT * FROM obtener_pedidos_usuario('3fa85f64-5717-4562-b3fc-2c963f66afa6');
+
+SELECT * FROM obtener_pedidos_usuario('883a5449-0e53-4186-8b03-84d4d3ee936d');
 
 SELECT 
     id_pedido as IdPedido,
@@ -1372,6 +1668,8 @@ SELECT
 FROM obtener_pedidos_usuario('60cda050-62ce-4786-8f72-16fb1fcc1af0');
 
 drop FUNCTION obtener_detalle_pedido
+
+select * from obtener_detalle_pedido('087e90b1-51a2-4f76-9afb-05c0885c7911')
 --Obtener detalle de pedido
 CREATE OR REPLACE FUNCTION obtener_detalle_pedido(
     p_id_pedido UUID
@@ -2261,6 +2559,7 @@ DECLARE
     descuento DECIMAL;
     total_descuento DECIMAL;
 BEGIN
+	SET TIME ZONE 'America/El_Salvador';
     -- Buscar cupón por código
     SELECT *
     INTO cupon_reg
@@ -2323,11 +2622,9 @@ BEGIN
     END IF;
 END;
 $$ LANGUAGE plpgsql;
+SHOW timezone;
 
-
-
-
-
+select * from validar_y_aplicar_cupon('NEWDATE', 20, '5b4197bb-a13e-4e08-a6e9-9705a96be22d')
 
 
 
@@ -2527,5 +2824,577 @@ UPDATE producto_imagen SET url_imagen = 'https://pedidosdigitalesblob.blob.core.
 
 
 
- 
+  SELECT 
+                            id_pedido as IdPedido,
+                            numero_pedido as NumeroPedido,
+                            estado_actual as EstadoActual,
+                            estados as Estados,
+                            productos as Productos,
+                            cupones as Cupones,
+                            total as Total,
+                            total_con_descuento as TotalConDescuento,
+                            metodo_pago as MetodoPago,
+                            fecha_creacion as FechaCreacion,
+                            tiempo_transcurrido as TiempoTranscurrido,
+                            (select promedio_hoy from public.calcular_promedios_preparacion() as promedio)
+                        FROM obtener_detalle_pedido('d88f2478-af86-49fe-bdf9-e747c00c52b9')
                         
+                        select * from public.calcular_promedios_preparacion() as promedio
+                        
+                        
+ select * from producto                       
+ UPDATE producto
+ SET es_activo=true, fecha_actualizacion=NULL, actualizado_por=NULL
+ WHERE id_producto='bfaa26d9-6a8f-4855-8ec9-130906e8d2bc'::uuid;  
+ 
+ 
+ SELECT * FROM pg_stat_activity;
+SELECT pg_terminate_backend(pid)
+FROM pg_stat_activity
+WHERE datname = 'CafeteriaBeta'
+  AND pid <> pg_backend_pid();
+ 
+ SELECT idpedido AS IdPedido, tiempoestimado AS TiempoEstimado FROM obtener_etas_pedidos()
+ 
+ 
+ SELECT 
+                    p.id_pedido as IdPedido,
+                    p.numero_pedido as NumeroPedido,
+                    COALESCE(p.creado_por, 'Cliente No Identificado') as Cliente,
+                    (SELECT email
+					FROM user_entity where id::uuid = p.id_usuario::uuid) as Correo,
+                    hep.estado  as EstadoActual,
+                    p.metodo_pago as MetodoPago,
+                    p.total as Total,
+                    p.fecha_creacion as FechaCreacion
+                FROM pedido p
+                LEFT JOIN (
+                    SELECT 
+                        id_pedido,
+                        estado,
+                        ROW_NUMBER() OVER (PARTITION BY id_pedido ORDER BY fecha_creacion DESC) as rn
+                    FROM historial_estado_pedido
+                ) hep ON p.id_pedido = hep.id_pedido AND hep.rn = 1
+                ORDER BY p.fecha_creacion DESC
+
+ -- En tu base de datos actual
+CREATE EXTENSION IF NOT EXISTS postgres_fdw;
+
+-- Crear el servidor remoto
+CREATE SERVER keycloak_server
+FOREIGN DATA WRAPPER postgres_fdw
+OPTIONS (
+    host 'db-postgresql-nyc3-99023-do-user-18706657-0.k.db.ondigitalocean.com',
+    dbname 'keycloak',
+    port '25060',
+    sslmode 'require'  -- 🔒 DigitalOcean requiere SSL
+);
+
+-- Crear el mapeo de usuario
+CREATE USER MAPPING FOR CURRENT_USER
+SERVER keycloak_server
+OPTIONS (user 'doadmin', password 'AVNS_Jv9mcVOk_LozcflpjrN');
+
+-- Importar la tabla
+IMPORT FOREIGN SCHEMA public
+FROM SERVER keycloak_server
+INTO public;
+               
+DROP SERVER IF EXISTS keycloak_server CASCADE;
+SELECT * FROM user_entity;
+select * from saldo_usuario;
+
+
+CREATE OR REPLACE FUNCTION eliminar_producto_completo(p_id_producto UUID)
+RETURNS BOOLEAN AS $$
+BEGIN
+    -- Eliminar en orden inverso de dependencias
+    DELETE FROM producto_imagen WHERE id_producto = p_id_producto;
+    DELETE FROM descuento_producto WHERE id_producto = p_id_producto;
+    DELETE FROM producto_preferencia_dietetica WHERE id_producto = p_id_producto;
+    DELETE FROM producto_alergeno WHERE id_producto = p_id_producto;
+    DELETE FROM producto_ingrediente WHERE id_producto = p_id_producto;
+    DELETE FROM producto_categoria WHERE id_producto = p_id_producto;
+    
+    -- Opcional: Si no quieres eliminar pedidos, solo actualiza a NULL
+    -- UPDATE detalle_pedido SET id_producto = NULL WHERE id_producto = p_id_producto;
+    
+    -- O si quieres eliminar los detalles del pedido también:
+    -- DELETE FROM detalle_pedido WHERE id_producto = p_id_producto;
+    
+    -- Finalmente, eliminar el producto
+    DELETE FROM producto WHERE id_producto = p_id_producto;
+    
+    RETURN TRUE;
+EXCEPTION
+    WHEN OTHERS THEN
+        RAISE NOTICE 'Error al eliminar producto: %', SQLERRM;
+        RETURN FALSE;
+END;
+$$ LANGUAGE plpgsql;
+
+WITH ultimo_estado AS (
+                    SELECT DISTINCT ON (id_pedido)
+                        id_pedido,
+                        estado,
+                        fecha_creacion
+                    FROM historial_estado_pedido
+                    ORDER BY id_pedido, fecha_creacion DESC
+                )
+                SELECT 
+                    p.id_pedido,
+                      (SELECT first_name || ' ' || last_name 
+					   FROM user_entity where id::uuid = p.id_usuario::uuid) AS nombre_cliente,
+                    ue.estado,
+                    p.fecha_creacion,
+                    p.total
+                FROM pedido p
+                INNER JOIN ultimo_estado ue ON p.id_pedido = ue.id_pedido
+                WHERE p.fecha_creacion >= CURRENT_DATE
+                ORDER BY p.fecha_creacion DESC
+                LIMIT 4
+                
+SELECT 
+                    p.numero_pedido as NumeroPedido,
+                    (SELECT first_name || ' ' || last_name 
+					   FROM user_entity where id::uuid = p.id_usuario::uuid) as Cliente,
+                    hep.estado as Estado,
+                    p.metodo_pago as MetodoPago,
+                    p.fecha_creacion as FechaCreacion,
+                    COALESCE(p.fecha_actualizacion, p.fecha_creacion) as UltimaActualizacion,
+                    p.total_con_descuento as Total
+                FROM pedido p
+                LEFT JOIN (
+                    SELECT 
+                        id_pedido,
+                        estado,
+                        ROW_NUMBER() OVER (PARTITION BY id_pedido ORDER BY fecha_creacion DESC) as rn
+                    FROM historial_estado_pedido
+                ) hep ON p.id_pedido = hep.id_pedido AND hep.rn = 1
+                WHERE p.numero_pedido = @NumeroPedido";
+
+                    var pedido = await _conexionDb.QueryFirstOrDefaultAsync<DetalleOrden>(
+                        sqlPedido, new { NumeroPedido = numeroPedido });
+
+                    if (pedido == null)
+                        return;
+
+                    // Obtener productos del pedido
+                    string sqlProductos = @"
+                SELECT 
+                    pr.nombre as Nombre,
+                    pr.descripcion as Descripcion,
+                    COALESCE(pi.url_imagen, '') as UrlImagenPrincipal,
+                    dp.cantidad as Cantidad,
+                    dp.precio_unitario as PrecioUnitario,
+                    (dp.cantidad * dp.precio_unitario) as Subtotal
+                FROM detalle_pedido dp
+                INNER JOIN pedido p ON dp.id_pedido = p.id_pedido
+                INNER JOIN producto pr ON dp.id_producto = pr.id_producto
+                LEFT JOIN (
+                    SELECT 
+                        id_producto,
+                        url_imagen,
+                        ROW_NUMBER() OVER (PARTITION BY id_producto ORDER BY 
+                            CASE WHEN es_principal THEN 1 ELSE 2 END, orden ASC) as rn
+                    FROM producto_imagen
+                ) pi ON pr.id_producto = pi.id_producto AND pi.rn = 1
+                WHERE p.numero_pedido = @NumeroPedido
+                ORDER BY dp.fecha_creacion                
+                
+  SELECT first_name || ' ' || last_name AS nombre_completo
+FROM user_entity;              
+  SELECT first_name + last_name  FROM user_entity              
+  
+drop function obtener_dashboard_completo()
+CREATE OR REPLACE FUNCTION obtener_dashboard_completo()
+RETURNS TABLE (
+    tipo_dato TEXT,
+    datos_json JSONB
+) AS $$
+BEGIN
+    RETURN QUERY
+    WITH periodos AS (
+        SELECT 
+            CURRENT_DATE AT TIME ZONE 'America/El_Salvador' as hoy,
+            (CURRENT_DATE - INTERVAL '7 days') AT TIME ZONE 'America/El_Salvador' as inicio_semana,
+            (CURRENT_DATE - INTERVAL '30 days') AT TIME ZONE 'America/El_Salvador' as inicio_mes
+    ),
+    pedidos_con_estado AS (
+        SELECT 
+            p.*,
+            ue.estado as estado_actual,
+            ue.fecha_creacion as fecha_estado
+        FROM pedido p
+        INNER JOIN LATERAL (
+            SELECT estado, fecha_creacion
+            FROM historial_estado_pedido
+            WHERE id_pedido = p.id_pedido
+            ORDER BY fecha_creacion DESC
+            LIMIT 1
+        ) ue ON true
+        WHERE p.fecha_creacion >= (SELECT inicio_mes FROM periodos)
+    ),
+    estadisticas AS (
+        SELECT jsonb_build_object(
+            'ventaDia', COALESCE(SUM(CASE WHEN fecha_creacion >= (SELECT hoy FROM periodos) THEN total_con_descuento END), 0),
+            'ordenDia', COUNT(CASE WHEN fecha_creacion >= (SELECT hoy FROM periodos) THEN 1 END),
+            'clienteDia', COUNT(DISTINCT CASE WHEN fecha_creacion >= (SELECT hoy FROM periodos) THEN id_usuario END),
+            'ventaSemana', COALESCE(SUM(CASE WHEN fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN total_con_descuento END), 0),
+            'ordenSemana', COUNT(CASE WHEN fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN 1 END),
+            'clienteSemana', COUNT(DISTINCT CASE WHEN fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN id_usuario END),
+            'ventaMes', COALESCE(SUM(CASE WHEN fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN total_con_descuento END), 0),
+            'ordenMes', COUNT(CASE WHEN fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN 1 END),
+            'clienteMes', COUNT(DISTINCT CASE WHEN fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN id_usuario END)
+        ) as resultado
+        FROM pedidos_con_estado
+    ),
+    sumatoria_ordenes AS (
+        SELECT jsonb_build_object(
+            'pendienteHoy', COUNT(CASE WHEN estado_actual = 'Pendiente' AND fecha_creacion >= (SELECT hoy FROM periodos) THEN 1 END),
+            'recibidoHoy', COUNT(CASE WHEN estado_actual = 'Recibido' AND fecha_creacion >= (SELECT hoy FROM periodos) THEN 1 END),
+            'preparandoHoy', COUNT(CASE WHEN estado_actual = 'Preparando' AND fecha_creacion >= (SELECT hoy FROM periodos) THEN 1 END),
+            'listoHoy', COUNT(CASE WHEN estado_actual = 'Listo' AND fecha_creacion >= (SELECT hoy FROM periodos) THEN 1 END),
+            'completadoHoy', COUNT(CASE WHEN estado_actual = 'Entregado' AND fecha_creacion >= (SELECT hoy FROM periodos) THEN 1 END),
+            'pendienteSemana', COUNT(CASE WHEN estado_actual = 'Pendiente' AND fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN 1 END),
+            'recibidoSemana', COUNT(CASE WHEN estado_actual = 'Recibido' AND fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN 1 END),
+            'preparandoSemana', COUNT(CASE WHEN estado_actual = 'Preparando' AND fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN 1 END),
+            'listoSemana', COUNT(CASE WHEN estado_actual = 'Listo' AND fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN 1 END),
+            'completadoSemana', COUNT(CASE WHEN estado_actual = 'Entregado' AND fecha_creacion >= (SELECT inicio_semana FROM periodos) THEN 1 END),
+            'pendienteMes', COUNT(CASE WHEN estado_actual = 'Pendiente' AND fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN 1 END),
+            'recibidoMes', COUNT(CASE WHEN estado_actual = 'Recibido' AND fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN 1 END),
+            'preparandoMes', COUNT(CASE WHEN estado_actual = 'Preparando' AND fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN 1 END),
+            'listoMes', COUNT(CASE WHEN estado_actual = 'Listo' AND fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN 1 END),
+            'completadoMes', COUNT(CASE WHEN estado_actual = 'Entregado' AND fecha_creacion >= (SELECT inicio_mes FROM periodos) THEN 1 END)
+        ) as resultado
+        FROM pedidos_con_estado
+    ),
+    ventas_por_periodo AS (
+        WITH horas_dia AS (
+            SELECT 
+                rango,
+                hora_inicio,
+                COALESCE(SUM(total), 0) as total
+            FROM (
+                VALUES 
+                    ('12am-2am', 0),
+                    ('2am-4am', 2),
+                    ('4am-6am', 4),
+                    ('6am-8am', 6),
+                    ('8am-10am', 8),
+                    ('10am-12pm', 10),
+                    ('12pm-2pm', 12),
+                    ('2pm-4pm', 14),
+                    ('4pm-6pm', 16),
+                    ('6pm-8pm', 18),
+                    ('8pm-10pm', 20),
+                    ('10pm-12am', 22)
+            ) AS rangos(rango, hora_inicio)
+            LEFT JOIN (
+                SELECT 
+                    EXTRACT(HOUR FROM fecha_creacion AT TIME ZONE 'America/El_Salvador')::int as hora,
+                    total_con_descuento as total
+                FROM pedido
+                WHERE DATE(fecha_creacion AT TIME ZONE 'America/El_Salvador') = CURRENT_DATE
+            ) p ON p.hora >= rangos.hora_inicio AND p.hora < rangos.hora_inicio + 2
+            GROUP BY rango, hora_inicio
+            ORDER BY hora_inicio
+        ),
+        dias_semana AS (
+            SELECT 
+                dia_nombre,
+                dia_num,
+                COALESCE(total, 0) as total
+            FROM (
+                VALUES 
+                    ('Dom', 0),
+                    ('Lun', 1),
+                    ('Mar', 2),
+                    ('Mié', 3),
+                    ('Jue', 4),
+                    ('Vie', 5),
+                    ('Sáb', 6)
+            ) AS dias(dia_nombre, dia_num)
+            LEFT JOIN (
+                SELECT 
+                    EXTRACT(DOW FROM fecha_creacion AT TIME ZONE 'America/El_Salvador')::int as dia_semana,
+                    SUM(total_con_descuento) as total
+                FROM pedido
+                WHERE fecha_creacion AT TIME ZONE 'America/El_Salvador' >= CURRENT_DATE - INTERVAL '6 days'
+                    AND fecha_creacion AT TIME ZONE 'America/El_Salvador' < CURRENT_DATE + INTERVAL '1 day'
+                GROUP BY EXTRACT(DOW FROM fecha_creacion AT TIME ZONE 'America/El_Salvador')
+            ) p ON p.dia_semana = dias.dia_num
+            ORDER BY dia_num
+        ),
+        semanas_mes AS (
+            SELECT 
+                'Sem ' || (ROW_NUMBER() OVER (ORDER BY semana_inicio))::text as semana_label,
+                COALESCE(SUM(total_con_descuento), 0) as total
+            FROM (
+                SELECT 
+                    DATE_TRUNC('week', generate_series(
+                        DATE_TRUNC('month', CURRENT_DATE AT TIME ZONE 'America/El_Salvador'),
+                        DATE_TRUNC('month', CURRENT_DATE AT TIME ZONE 'America/El_Salvador') + INTERVAL '1 month' - INTERVAL '1 day',
+                        '1 week'::interval
+                    )) as semana_inicio
+            ) semanas
+            LEFT JOIN pedido p ON DATE_TRUNC('week', p.fecha_creacion AT TIME ZONE 'America/El_Salvador') = semanas.semana_inicio
+                AND p.fecha_creacion AT TIME ZONE 'America/El_Salvador' >= DATE_TRUNC('month', CURRENT_DATE)
+                AND p.fecha_creacion AT TIME ZONE 'America/El_Salvador' < DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month'
+            GROUP BY semanas.semana_inicio
+            ORDER BY semanas.semana_inicio
+        )
+        SELECT jsonb_build_object(
+            'day', jsonb_build_object(
+                'labels', (SELECT jsonb_agg(rango ORDER BY hora_inicio) FROM horas_dia),
+                'data', (SELECT jsonb_agg(total ORDER BY hora_inicio) FROM horas_dia)
+            ),
+            'week', jsonb_build_object(
+                'labels', (SELECT jsonb_agg(dia_nombre ORDER BY dia_num) FROM dias_semana),
+                'data', (SELECT jsonb_agg(total ORDER BY dia_num) FROM dias_semana)
+            ),
+            'month', jsonb_build_object(
+                'labels', (SELECT jsonb_agg(semana_label) FROM semanas_mes),
+                'data', (SELECT jsonb_agg(total) FROM semanas_mes)
+            )
+        ) as resultado
+    ),
+    productos_populares AS (
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'idProducto', id_producto,
+                'nombre', nombre,
+                'urlImagen', url_imagen,
+                'totalVentas', total_ventas,
+                'porcentajeCambio', porcentaje_cambio
+            ) ORDER BY total_ventas DESC
+        ) as resultado
+        FROM (
+            SELECT 
+                p.id_producto,
+                p.nombre,
+                COALESCE(pi.url_imagen, '') as url_imagen,
+                COUNT(DISTINCT dp.id_pedido)::int as total_ventas,
+                0::numeric as porcentaje_cambio
+            FROM producto p
+            INNER JOIN detalle_pedido dp ON p.id_producto = dp.id_producto
+            INNER JOIN pedido ped ON dp.id_pedido = ped.id_pedido
+            LEFT JOIN producto_imagen pi ON p.id_producto = pi.id_producto AND pi.es_principal = true
+            WHERE ped.fecha_creacion >= CURRENT_DATE - INTERVAL '30 days'
+                AND p.es_activo = true
+            GROUP BY p.id_producto, p.nombre, pi.url_imagen
+            ORDER BY total_ventas DESC
+            LIMIT 4
+        ) t
+    ),
+    ordenes_recientes AS (
+        SELECT jsonb_agg(
+            jsonb_build_object(
+                'idPedido', id_pedido,
+                'nombreCliente', nombre_cliente,
+                'estado', estado_actual,
+                'fechaCreacion', fecha_creacion,
+                'total', total
+            ) ORDER BY fecha_creacion DESC
+        ) as resultado
+        FROM (
+            SELECT 
+                p.id_pedido,
+                COALESCE(u.first_name || ' ' || u.last_name, 'Cliente') as nombre_cliente,
+                p.estado_actual,
+                p.fecha_creacion,
+                p.total
+            FROM pedidos_con_estado p
+            LEFT JOIN user_entity u ON u.id::uuid = p.id_usuario
+            WHERE p.fecha_creacion >= CURRENT_DATE
+            ORDER BY p.fecha_creacion DESC
+            LIMIT 4
+        ) t
+    )
+    -- Retornar todos los resultados
+    SELECT 'clientesVentasOrdenes'::TEXT, resultado FROM estadisticas
+    UNION ALL
+    SELECT 'sumatoriaOrdenes'::TEXT, resultado FROM sumatoria_ordenes
+    UNION ALL
+    SELECT 'ventasPorPeriodo'::TEXT, resultado FROM ventas_por_periodo
+    UNION ALL
+    SELECT 'productosPopulares'::TEXT, resultado FROM productos_populares
+    UNION ALL
+    SELECT 'ordenesRecientes'::TEXT, resultado FROM ordenes_recientes;
+END;
+$$ LANGUAGE plpgsql;
+  
+SELECT tipo_dato, datos_json FROM obtener_dashboard_completo()
+  
+  SELECT EXISTS (
+    SELECT 1
+    FROM pedido_cupon pc
+    INNER JOIN pedido p ON pc.id_pedido = p.id_pedido
+    INNER JOIN cupon c ON pc.id_cupon = c.id_cupon
+    WHERE p.id_usuario = '883a5449-0e53-4186-8b03-84d4d3ee936d'::uuid
+      AND c.codigo = 'PRUEBAFORMATO'
+) as ya_uso_cupon;
+  
+WITH uso_cupon AS (
+    SELECT 
+        c.id_cupon,
+        c.codigo,
+        c.limite_uso,
+        COUNT(pc.id_pedido_cupon) as veces_usado_total,
+        COUNT(CASE WHEN p.id_usuario = '883a5449-0e53-4186-8b03-84d4d3ee936d'::uuid THEN 1 END) as veces_usado_por_usuario
+    FROM cupon c
+    LEFT JOIN pedido_cupon pc ON c.id_cupon = pc.id_cupon
+    LEFT JOIN pedido p ON pc.id_pedido = p.id_pedido
+    WHERE c.codigo = 'PRUEBAFORMATO'
+    GROUP BY c.id_cupon, c.codigo, c.limite_uso
+)
+SELECT 
+    codigo,
+    limite_uso,
+    veces_usado_total,
+    veces_usado_por_usuario,
+    CASE 
+        WHEN veces_usado_por_usuario > 0 THEN true
+        ELSE false
+    END as usuario_ya_uso_cupon,
+    CASE 
+        WHEN limite_uso IS NULL THEN true
+        WHEN veces_usado_total < limite_uso THEN true
+        ELSE false
+    END as cupon_aun_disponible
+FROM uso_cupon;
+
+WITH uso_cupon AS (
+    SELECT 
+        c.id_cupon,
+        c.codigo,
+        c.descuento,
+        c.tipo_descuento,
+        c.limite_uso,
+        c.es_activo,
+        c.fecha_expiracion,
+        COUNT(pc.id_pedido_cupon) as veces_usado_total,
+        COUNT(CASE WHEN p.id_usuario = '883a5449-0e53-4186-8b03-84d4d3ee936d'::uuid THEN 1 END) as veces_usado_por_usuario
+    FROM cupon c
+    LEFT JOIN pedido_cupon pc ON c.id_cupon = pc.id_cupon
+    LEFT JOIN pedido p ON pc.id_pedido = p.id_pedido
+    WHERE c.codigo = 'PRUEBAFORMATO'
+    GROUP BY c.id_cupon, c.codigo, c.descuento, c.tipo_descuento, c.limite_uso, c.es_activo, c.fecha_expiracion
+)
+SELECT 
+    codigo,
+    descuento,
+    tipo_descuento,
+    limite_uso,
+    veces_usado_total,
+    veces_usado_por_usuario,
+    -- Validaciones
+    CASE 
+        WHEN veces_usado_por_usuario > 0 THEN false  -- Usuario ya usó el cupón
+        WHEN NOT es_activo THEN false                -- Cupón inactivo
+        WHEN fecha_expiracion < now() THEN false     -- Cupón expirado
+        WHEN limite_uso IS NOT NULL AND veces_usado_total >= limite_uso THEN false  -- Límite global alcanzado
+        ELSE true
+    END as puede_usar_cupon,
+    -- Mensaje descriptivo
+    CASE 
+        WHEN veces_usado_por_usuario > 0 THEN 'Ya has utilizado este cupón anteriormente'
+        WHEN NOT es_activo THEN 'El cupón no está activo'
+        WHEN fecha_expiracion < now() THEN 'El cupón ha expirado'
+        WHEN limite_uso IS NOT NULL AND veces_usado_total >= limite_uso THEN 'El cupón ha alcanzado su límite de uso'
+        ELSE 'Cupón válido y disponible'
+    END as mensaje
+FROM uso_cupon;
+
+
+SELECT 
+    c.id_cupon AS IdCupon,
+    c.codigo AS Codigo,
+    c.descuento AS Descuento,
+    c.tipo_descuento AS TipoDescuento,
+    c.fecha_expiracion AS FechaExpiracion,
+    c.limite_uso AS LimiteUso,
+    c.es_activo AS EsActivo,
+    c.fecha_creacion AS FechaCreacion,
+    c.creado_por AS CreadoPor,
+    c.fecha_actualizacion AS FechaActualizacion,
+    c.actualizado_por AS ActualizadoPor,
+    -- Conteo de usos
+    COALESCE(COUNT(pc.id_pedido_cupon), 0) AS UsosActuales,
+    -- Usos restantes (null si no hay límite)
+    CASE 
+        WHEN c.limite_uso IS NULL THEN NULL
+        ELSE GREATEST(c.limite_uso - COUNT(pc.id_pedido_cupon), 0)
+    END AS UsosRestantes,
+    -- Porcentaje de uso
+    CASE 
+        WHEN c.limite_uso IS NULL OR c.limite_uso = 0 THEN NULL
+        ELSE ROUND((COUNT(pc.id_pedido_cupon)::NUMERIC / c.limite_uso) * 100, 2)
+    END AS PorcentajeUso,
+    -- Estado del cupón basado en usos
+    CASE 
+        WHEN c.limite_uso IS NOT NULL AND COUNT(pc.id_pedido_cupon) >= c.limite_uso THEN 'Agotado'
+        WHEN c.limite_uso IS NULL THEN 'Sin límite'
+        ELSE 'Disponible'
+    END AS EstadoUso
+FROM cupon c
+LEFT JOIN pedido_cupon pc ON c.id_cupon = pc.id_cupon
+WHERE c.codigo = 'PRUEBAFORMATO'
+GROUP BY 
+    c.id_cupon, c.codigo, c.descuento, c.tipo_descuento, 
+    c.fecha_expiracion, c.limite_uso, c.es_activo, 
+    c.fecha_creacion, c.creado_por, c.fecha_actualizacion, 
+    c.actualizado_por;
+
+--Flujo de Saldo
+SELECT id AS Id,userName AS UserName, email AS Correo FROM user_entity WHERE realm_id = '0a968fa2-46bc-45a1-884e-77df8034b23d'
+--Obtener usuarios
+SELECT * FROM user_entity where realm_id = '0a968fa2-46bc-45a1-884e-77df8034b23d';
+--Obtener saldo por usuario
+SELECT 
+  ue.id AS Id,
+  ue.email AS Correo,
+  s.saldo AS Saldo,
+  s.actualizado_por AS UsuarioModifica,
+  s.fecha_actualizacion AS fechaModificacion
+FROM saldo_usuario s inner join user_entity ue
+on ue.id::uuid = s.id_usuario::uuid
+
+--Asignar o recarga saldo
+CREATE OR REPLACE FUNCTION asignar_o_actualizar_saldo(
+  p_id_usuario UUID,
+  p_nuevo_saldo DECIMAL,
+  p_actualizado_por TEXT
+)
+RETURNS TEXT AS $$
+DECLARE
+  v_existe BOOLEAN;
+BEGIN
+  SELECT EXISTS (
+    SELECT 1 FROM saldo_usuario WHERE id_usuario = p_id_usuario
+  ) INTO v_existe;
+
+  IF v_existe THEN
+    UPDATE saldo_usuario
+    SET saldo = p_nuevo_saldo,
+        actualizado_por = p_actualizado_por,
+        fecha_actualizacion = NOW()
+    WHERE id_usuario = p_id_usuario;
+
+    RETURN 'Saldo actualizado correctamente.';
+  ELSE
+    INSERT INTO saldo_usuario (
+      id_usuario, saldo, creado_por
+    ) VALUES (
+      p_id_usuario, p_nuevo_saldo, p_actualizado_por
+    );
+
+    RETURN 'Saldo asignado correctamente.';
+  END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Verificar si el usuario tiene suficiente saldo
+PERFORM 1 FROM saldo_usuario 
+WHERE id_usuario = p_id_usuario AND saldo >= p_total_con_descuento;
+
